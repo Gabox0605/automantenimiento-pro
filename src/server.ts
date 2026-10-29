@@ -814,6 +814,27 @@ function readDatabaseUrl(): string {
     );
   }
 
+  // Validación temprana: si la URL no es parseable, el error debe aparecer en
+  // los logs del arranque (Render → Logs), no como un 500 genérico en cada
+  // petición. Se enmascara cualquier credential en la salida.
+  let parsed: URL;
+  try {
+    parsed = new URL(connectionString);
+  } catch {
+    throw new Error(
+      'DATABASE_URL no es una URL válida de PostgreSQL. Se espera el formato ' +
+        'postgres://usuario:clave@host:5432/base, sin comillas, saltos de línea ni espacios. ' +
+        'Copia la "Database URL" con el botón de copiar desde Render → PostgreSQL → Connections ' +
+        'y pégala en Environment del servicio web (evita escribirla a mano).',
+    );
+  }
+
+  if (parsed.protocol !== 'postgres:' && parsed.protocol !== 'postgresql:') {
+    throw new Error(
+      `DATABASE_URL usa un esquema no soportado ("${parsed.protocol}"). Debe empezar por postgres:// o postgresql://.`,
+    );
+  }
+
   return connectionString;
 }
 
