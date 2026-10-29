@@ -507,10 +507,17 @@ function classifyDatabaseError(error: unknown): DbFailureKind {
   if (code === 'ECONNREFUSED') {
     return 'connection_refused';
   }
-  if (code === 'ENOTFOUND' || code === 'EHOSTUNREACH') {
+  if (code === 'ENOTFOUND' || code === 'EHOSTUNREACH' || code === 'EAI_AGAIN') {
     return 'host_unreachable';
   }
-  if (code === 'ETIMEDOUT' || code === '57P03' /* cannot_connect_now */) {
+  if (
+    code === 'ETIMEDOUT' ||
+    code === 'ECONNRESET' ||
+    code === '57P03' /* cannot_connect_now */ ||
+    message.includes('timeout exceeded when trying to connect') ||
+    message.includes('connection terminated') ||
+    message.includes('connection ended unexpectedly')
+  ) {
     return 'timeout';
   }
   if (code === '28P01' || code === '28000') {
@@ -522,7 +529,7 @@ function classifyDatabaseError(error: unknown): DbFailureKind {
   if (code === '53300') {
     return 'too_many_connections';
   }
-  if (message.includes('ssl') && message.includes('server')) {
+  if (message.includes('ssl') || message.includes('certificate')) {
     return 'ssl_required';
   }
   if (code === '42P01') {
@@ -530,6 +537,32 @@ function classifyDatabaseError(error: unknown): DbFailureKind {
   }
 
   return 'unknown';
+}
+
+/**
+ * Extrae el código de error y un extracto seguro del mensaje.
+ *
+ * Enmascara cualquier cadena tipo conexión (`postgres://user:pass@host/db`)
+ * y credenciales para poder diagnosticar sin filtrar secretos.
+ */
+function describeDatabaseError(error: unknown): {
+  kind: DbFailureKind;
+  code: string;
+  hint: string;
+} {
+  const kind = classifyDatabaseError(error);
+
+  if (!(error instanceof Error)) {
+    return { kind, code: '', hint: '' };
+  }
+
+  const code = 'code' in error ? String(error.code ?? '') : '';
+  const hint = error.message
+    .replace(/postgres(ql)?:\/\/[^\s'"]+/gi, 'postgres://***')
+    .replace(/(password|passwd|pwd)\s*[=:]\s*[^\s'"]+/gi, '$1=***')
+    .slice(0, 160);
+
+  return { kind, code, hint };
 }
 
 /** Tablas mínimas que debe existir según specs/database-schema.sql. */
@@ -550,15 +583,17 @@ const REQUIRED_TABLES = [
 async function diagnoseDatabase(pool: Pool): Promise<{
   connection: 'ok' | 'error';
   kind?: DbFailureKind;
+  code?: string;
+  hint?: string;
   schema?: 'ok' | 'missing_tables';
   missingTables?: string[];
 }> {
   try {
     await pool.query('SELECT 1');
   } catch (error) {
-    const kind = classifyDatabaseError(error);
-    console.error(`[HEALTH] Diagnóstico de BD -> ${kind}:`, error);
-    return { connection: 'error', kind };
+    const detail = describeDatabaseError(error);
+    console.error(`[HEALTH] Diagnóstico de BD -> ${detail.kind}:`, error);
+    return { connection: 'error', ...detail };
   }
 
   try {
@@ -587,9 +622,9 @@ async function diagnoseDatabase(pool: Pool): Promise<{
 
     return { connection: 'ok', schema: 'ok' };
   } catch (error) {
-    const kind = classifyDatabaseError(error);
-    console.error(`[HEALTH] Diagnóstico de esquema -> ${kind}:`, error);
-    return { connection: 'ok', kind };
+    const detail = describeDatabaseError(error);
+    console.error(`[HEALTH] Diagnóstico de esquema -> ${detail.kind}:`, error);
+    return { connection: 'ok', ...detail };
   }
 }
 
