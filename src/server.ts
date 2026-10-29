@@ -477,6 +477,122 @@ function readServiceType(
 // Construcción de la aplicación
 // ============================================================================
 
+/** Categorías de fallo de base de datos expuestas por el diagnóstico. */
+type DbFailureKind =
+  | 'connection_refused'
+  | 'host_unreachable'
+  | 'timeout'
+  | 'invalid_credentials'
+  | 'database_not_found'
+  | 'ssl_required'
+  | 'too_many_connections'
+  | 'schema_incomplete'
+  | 'query_failed'
+  | 'unknown';
+
+/**
+ * Traduce un error de `pg` a una categoría segura.
+ *
+ * Nunca expone mensajes crudos (pueden contener host, usuario o parte de la
+ * cadena de conexión): solo el código SQLSTATE o de sistema del error.
+ */
+function classifyDatabaseError(error: unknown): DbFailureKind {
+  if (!(error instanceof Error)) {
+    return 'unknown';
+  }
+
+  const code = 'code' in error ? String(error.code ?? '') : '';
+  const message = error.message.toLowerCase();
+
+  if (code === 'ECONNREFUSED') {
+    return 'connection_refused';
+  }
+  if (code === 'ENOTFOUND' || code === 'EHOSTUNREACH') {
+    return 'host_unreachable';
+  }
+  if (code === 'ETIMEDOUT' || code === '57P03' /* cannot_connect_now */) {
+    return 'timeout';
+  }
+  if (code === '28P01' || code === '28000') {
+    return 'invalid_credentials';
+  }
+  if (code === '3D000') {
+    return 'database_not_found';
+  }
+  if (code === '53300') {
+    return 'too_many_connections';
+  }
+  if (message.includes('ssl') && message.includes('server')) {
+    return 'ssl_required';
+  }
+  if (code === '42P01') {
+    return 'schema_incomplete';
+  }
+
+  return 'unknown';
+}
+
+/** Tablas mínimas que debe existir según specs/database-schema.sql. */
+const REQUIRED_TABLES = [
+  'vehiculos',
+  'odometro_logs',
+  'mantenimientos',
+  'codigos_obd2',
+  'catalogo_especificaciones',
+] as const;
+
+/**
+ * Diagnóstico profundo de la base de datos (solo con `?db=1`).
+ *
+ * Devuelve una categoría acotada del fallo (o el detalle de tablas
+ * faltantes) sin filtrar credenciales ni mensajes internos de PostgreSQL.
+ */
+async function diagnoseDatabase(pool: Pool): Promise<{
+  connection: 'ok' | 'error';
+  kind?: DbFailureKind;
+  schema?: 'ok' | 'missing_tables';
+  missingTables?: string[];
+}> {
+  try {
+    await pool.query('SELECT 1');
+  } catch (error) {
+    const kind = classifyDatabaseError(error);
+    console.error(`[HEALTH] Diagnóstico de BD -> ${kind}:`, error);
+    return { connection: 'error', kind };
+  }
+
+  try {
+    const result = await pool.query<{
+      table_name: string;
+    }>(
+      `SELECT table_name
+         FROM information_schema.tables
+        WHERE table_schema = 'public'
+          AND table_name = ANY($1::text[])`,
+      [REQUIRED_TABLES],
+    );
+
+    const found = new Set(result.rows.map((row) => row.table_name));
+    const missingTables = REQUIRED_TABLES.filter(
+      (table) => !found.has(table),
+    );
+
+    if (missingTables.length > 0) {
+      return {
+        connection: 'ok',
+        schema: 'missing_tables',
+        missingTables,
+      };
+    }
+
+    return { connection: 'ok', schema: 'ok' };
+  } catch (error) {
+    const kind = classifyDatabaseError(error);
+    console.error(`[HEALTH] Diagnóstico de esquema -> ${kind}:`, error);
+    return { connection: 'ok', kind };
+  }
+}
+
 /**
  * Crea la aplicación Express con los servicios inyectados a partir del pool.
  * Se exporta para poder probarla sin abrir un puerto.
@@ -498,14 +614,28 @@ export function createApp(pool: Pool): Express {
 
   // --------------------------------------------------------------------------
   // GET /api/health  → sonda de salud para Render / load balancers
+  //   Con ?db=1 añade un diagnóstico profundo (seguro: sin credenciales ni
+  //   mensajes crudos) que distingue fallos de conexión, autenticación,
+  //   disponibilidad y tablas faltantes del esquema.
   // --------------------------------------------------------------------------
-  app.get('/api/health', (_request, response) => {
-    response.status(200).json({
-      status: 'ok',
-      service: 'auto-mantenimiento-pro-api',
-      timestamp: new Date().toISOString(),
-    });
-  });
+  app.get(
+    '/api/health',
+    asyncHandler(async (request, response) => {
+      const base = {
+        status: 'ok',
+        service: 'auto-mantenimiento-pro-api',
+        timestamp: new Date().toISOString(),
+      };
+
+      if (request.query.db !== '1') {
+        response.status(200).json(base);
+        return;
+      }
+
+      const database = await diagnoseDatabase(pool);
+      response.status(200).json({ ...base, database });
+    }),
+  );
 
   // --------------------------------------------------------------------------
   // GET /api/vehicles/:id/odometer

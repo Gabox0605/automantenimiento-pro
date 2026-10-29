@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { getObd2Code, getOdometerSnapshot } from '../services/api.js';
+import { getObd2Code, getOdometerSnapshot, BASE_URL } from '../services/api.js';
 import type {
   MaintenanceResponse,
   Obd2Code,
@@ -553,7 +553,7 @@ export function Dashboard() {
                 </p>
                 <p className="mt-1 text-sm text-muted">
                   {hasError
-                    ? 'Verifica que el backend esté en ejecución en http://localhost:3001.'
+                    ? `Verifica que la API esté disponible en ${getApiOrigin()}.`
                     : isLoading
                       ? 'Obteniendo odómetro y diagnóstico OBD-II.'
                       : 'Los datos mostrados provienen del backend y PostgreSQL.'}
@@ -781,6 +781,21 @@ function toErrorMessage(error: unknown, fallback: string): string {
   }
 
   return fallback;
+}
+
+/**
+ * Origen (esquema + host) de la API configurada.
+ *
+ * Se usa en los mensajes de error para indicar la URL real que intenta
+ * alcanzar el cliente: en local será `http://localhost:3001` y en producción
+ * la URL de Render definida en `VITE_API_URL`.
+ */
+function getApiOrigin(): string {
+  try {
+    return new URL(BASE_URL).origin;
+  } catch {
+    return BASE_URL || 'la API configurada';
+  }
 }
 
 function GaugeIcon() {
