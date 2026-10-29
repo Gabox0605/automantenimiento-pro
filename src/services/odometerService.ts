@@ -29,6 +29,12 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 /** Límite de un INTEGER de PostgreSQL, para validar antes de llegar a la BD. */
 const MAX_POSTGRES_INTEGER = 2_147_483_647;
 
+/** Cantidad de lecturas que se devuelven por defecto en la consulta de odómetro. */
+export const DEFAULT_ODOMETER_HISTORY_LIMIT = 100;
+
+/** Tope de lecturas que se pueden pedir en una sola consulta. */
+export const MAX_ODOMETER_HISTORY_LIMIT = 500;
+
 // ============================================================================
 // Tipos públicos del servicio
 // ============================================================================
@@ -62,6 +68,17 @@ export interface OdometerUsageRate {
   dailyAverageKm: number;
   /** Proyección semanal del promedio diario. */
   weeklyAverageKm: number;
+}
+
+/** Estado actual del odómetro y su historial de lecturas. */
+export interface OdometerSnapshot {
+  vehicleId: number;
+  /** Kilometraje actual mantenido por el trigger en `vehiculos`. */
+  currentKilometers: number;
+  /** Kilometraje con el que se dio de alta el vehículo. */
+  initialKilometers: number;
+  /** Lecturas ordenadas de la más reciente a la más antigua. */
+  readings: OdometerReading[];
 }
 
 /** Códigos de error estables para que la capa HTTP/UI pueda reaccionar. */
@@ -112,6 +129,12 @@ interface VehicleRow extends QueryResultRow {
   kilometraje_inicial: number;
 }
 
+interface VehicleSnapshotRow extends QueryResultRow {
+  id: number;
+  kilometraje_inicial: number;
+  kilometraje_actual: number;
+}
+
 interface VehicleIdRow extends QueryResultRow {
   id: number;
 }
@@ -142,6 +165,20 @@ const SELECT_LATEST_READING = `
    WHERE vehiculo_id = $1
    ORDER BY fecha_registro DESC, id DESC
    LIMIT 1
+`;
+
+const SELECT_VEHICLE_SNAPSHOT = `
+  SELECT id, kilometraje_inicial, kilometraje_actual
+    FROM vehiculos
+   WHERE id = $1
+`;
+
+const SELECT_ODOMETER_HISTORY = `
+  SELECT id, vehiculo_id, kilometraje, fecha_registro
+    FROM odometro_logs
+   WHERE vehiculo_id = $1
+   ORDER BY fecha_registro DESC, id DESC
+   LIMIT $2
 `;
 
 const SELECT_LAST_TWO_READINGS = `
@@ -306,6 +343,55 @@ export class OdometerService {
     return computeUsageRate(vehicleId, previousReading, currentReading);
   }
 
+  /**
+   * Consulta el kilometraje actual del vehículo y sus lecturas recientes.
+   *
+   * Las lecturas se devuelven de la más reciente a la más antigua. El límite
+   * existe para no enviar historiales ilimitados a la UI.
+   *
+   * @throws {OdometerServiceError} INVALID_INPUT, VEHICLE_NOT_FOUND o
+   *         DATABASE_ERROR.
+   */
+  async getOdometerSnapshot(
+    vehicleId: number,
+    historyLimit: number = DEFAULT_ODOMETER_HISTORY_LIMIT,
+  ): Promise<OdometerSnapshot> {
+    assertPositiveInteger(vehicleId, 'vehicleId');
+    assertHistoryLimit(historyLimit);
+
+    try {
+      const vehicleResult = await this.pool.query<VehicleSnapshotRow>(
+        SELECT_VEHICLE_SNAPSHOT,
+        [vehicleId],
+      );
+      const vehicle = vehicleResult.rows[0];
+
+      if (!vehicle) {
+        throw new OdometerServiceError(
+          'VEHICLE_NOT_FOUND',
+          `No existe un vehículo con id ${vehicleId}.`,
+        );
+      }
+
+      const readingsResult = await this.pool.query<OdometerLogRow>(
+        SELECT_ODOMETER_HISTORY,
+        [vehicleId, historyLimit],
+      );
+
+      return {
+        vehicleId: vehicle.id,
+        currentKilometers: vehicle.kilometraje_actual,
+        initialKilometers: vehicle.kilometraje_inicial,
+        readings: readingsResult.rows.map(mapReading),
+      };
+    } catch (error) {
+      throw OdometerService.toServiceError(
+        error,
+        'No se pudo consultar el odómetro del vehículo',
+      );
+    }
+  }
+
   /** Obtiene las dos lecturas más recientes del vehículo. */
   private async fetchLastTwoReadings(
     vehicleId: number,
@@ -448,6 +534,19 @@ function assertValidDate(value: Date, fieldName: string): void {
     throw new OdometerServiceError(
       'INVALID_INPUT',
       `${fieldName} debe ser una fecha válida.`,
+    );
+  }
+}
+
+function assertHistoryLimit(value: number): void {
+  if (
+    !Number.isInteger(value) ||
+    value <= 0 ||
+    value > MAX_ODOMETER_HISTORY_LIMIT
+  ) {
+    throw new OdometerServiceError(
+      'INVALID_INPUT',
+      `historyLimit debe ser un entero entre 1 y ${MAX_ODOMETER_HISTORY_LIMIT}.`,
     );
   }
 }

@@ -1,0 +1,625 @@
+/**
+ * Servidor API REST de AutoMantenimiento Pro.
+ * ----------------------------------------------------------------------------
+ * Expone los servicios de dominio a través de HTTP para que el frontend pueda
+ * consumirlos:
+ *
+ *   GET  /api/vehicles/:id/odometer  → odómetro actual + historial de lecturas
+ *   POST /api/vehicles/:id/odometer  → registrar una lectura (F03)
+ *   POST /api/maintenance            → registrar un mantenimiento (F05)
+ *   GET  /api/obd2/:code             → consultar un código OBD-II (F10)
+ *
+ * Uso:
+ *   DATABASE_URL=postgres://usuario:clave@localhost:5432/auto_mantenimiento_pro \
+ *     npm run dev:server
+ *
+ * El puerto se toma de PORT o, si no está definido, se usa 3001.
+ */
+
+import cors from 'cors';
+import express from 'express';
+import type {
+  ErrorRequestHandler,
+  Express,
+  Request,
+  RequestHandler,
+  Response,
+} from 'express';
+import { Pool } from 'pg';
+
+import {
+  DEFAULT_ODOMETER_HISTORY_LIMIT,
+  MAX_ODOMETER_HISTORY_LIMIT,
+  OdometerService,
+  OdometerServiceError,
+} from './services/odometerService.js';
+import type { RegisterOdometerReadingInput } from './services/odometerService.js';
+import {
+  MaintenanceService,
+  MaintenanceServiceError,
+  MAINTENANCE_SERVICE_TYPES,
+} from './services/maintenanceService.js';
+import type {
+  MaintenanceServiceType,
+  RegisterMaintenanceInput,
+} from './services/maintenanceService.js';
+import { Obd2Service, Obd2ServiceError } from './services/obd2Service.js';
+
+/** Puerto por defecto cuando la variable de entorno PORT no está definida. */
+const DEFAULT_PORT = 3001;
+
+/** Tamaño máximo aceptado para el cuerpo JSON de una petición. */
+const JSON_BODY_LIMIT = '100kb';
+
+// ============================================================================
+// Errores de la capa HTTP
+// ============================================================================
+
+/** Error controlado de la API (petición inválida, ruta inexistente, etc.). */
+class ApiError extends Error {
+  public readonly statusCode: number;
+  public readonly code: string;
+
+  constructor(statusCode: number, code: string, message: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.statusCode = statusCode;
+    this.code = code;
+    Object.setPrototypeOf(this, ApiError.prototype);
+  }
+}
+
+type DomainError =
+  | OdometerServiceError
+  | MaintenanceServiceError
+  | Obd2ServiceError;
+
+function isDomainError(error: unknown): error is DomainError {
+  return (
+    error instanceof OdometerServiceError ||
+    error instanceof MaintenanceServiceError ||
+    error instanceof Obd2ServiceError
+  );
+}
+
+// ============================================================================
+// Utilidades de Express
+// ============================================================================
+
+type AsyncRouteHandler = (
+  request: Request,
+  response: Response,
+) => Promise<void>;
+
+/**
+ * Envuelve un handler asíncrono para que cualquier rechazo llegue al
+ * middleware centralizado de errores.
+ */
+function asyncHandler(handler: AsyncRouteHandler): RequestHandler {
+  return (request, response, next) => {
+    void handler(request, response).catch(next);
+  };
+}
+
+/**
+ * Middleware centralizado de errores.
+ *
+ * Traduce los errores de dominio a códigos HTTP adecuados y evita exponer
+ * detalles internos de PostgreSQL en las respuestas 500.
+ */
+const errorHandler: ErrorRequestHandler = (error, _request, response, next) => {
+  if (response.headersSent) {
+    next(error);
+    return;
+  }
+
+  const mapped = mapError(error);
+
+  if (mapped.statusCode >= 500) {
+    const detail =
+      isDomainError(error) && error.originalError !== undefined
+        ? error.originalError
+        : error;
+
+    console.error(`[API] ${mapped.code}:`, detail);
+  }
+
+  response.status(mapped.statusCode).json({
+    error: {
+      code: mapped.code,
+      message: mapped.message,
+    },
+  });
+};
+
+interface MappedError {
+  statusCode: number;
+  code: string;
+  message: string;
+}
+
+function mapError(error: unknown): MappedError {
+  if (error instanceof ApiError) {
+    return {
+      statusCode: error.statusCode,
+      code: error.code,
+      message: error.message,
+    };
+  }
+
+  if (isDomainError(error)) {
+    const statusCode = statusForDomainCode(error.code);
+
+    // Los fallos de base de datos se registran completos, pero al cliente solo
+    // se le devuelve un mensaje genérico.
+    if (statusCode >= 500) {
+      return {
+        statusCode,
+        code: error.code,
+        message: 'Error interno del servidor.',
+      };
+    }
+
+    return {
+      statusCode,
+      code: error.code,
+      message: error.message,
+    };
+  }
+
+  if (isJsonParseError(error)) {
+    return {
+      statusCode: 400,
+      code: 'INVALID_JSON',
+      message: 'El cuerpo de la petición no contiene JSON válido.',
+    };
+  }
+
+  return {
+    statusCode: 500,
+    code: 'INTERNAL_ERROR',
+    message: 'Error interno del servidor.',
+  };
+}
+
+function statusForDomainCode(code: string): number {
+  switch (code) {
+    case 'VEHICLE_NOT_FOUND':
+    case 'CODE_NOT_FOUND':
+    case 'CATALOG_NOT_FOUND':
+      return 404;
+
+    case 'DATABASE_ERROR':
+      return 500;
+
+    // INVALID_INPUT, INVALID_CODE, INVALID_SEVERITY, READING_TOO_LOW,
+    // INSUFFICIENT_READINGS, NO_ELAPSED_TIME e INCONSISTENT_READINGS son
+    // errores de la petición o del estado del recurso.
+    default:
+      return 400;
+  }
+}
+
+function isJsonParseError(error: unknown): boolean {
+  return (
+    error instanceof SyntaxError &&
+    typeof error === 'object' &&
+    error !== null &&
+    'type' in error &&
+    (error as { type?: unknown }).type === 'entity.parse.failed'
+  );
+}
+
+// ============================================================================
+// Validación y normalización de la entrada HTTP
+// ============================================================================
+
+function asObject(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new ApiError(
+      400,
+      'INVALID_BODY',
+      'El cuerpo de la petición debe ser un objeto JSON.',
+    );
+  }
+
+  return value as Record<string, unknown>;
+}
+
+function parseVehicleId(raw: string | string[] | undefined): number {
+  if (raw === undefined || Array.isArray(raw)) {
+    throw new ApiError(
+      400,
+      'INVALID_VEHICLE_ID',
+      'El id del vehículo es obligatorio.',
+    );
+  }
+
+  const vehicleId = Number(raw);
+
+  if (!Number.isInteger(vehicleId) || vehicleId <= 0) {
+    throw new ApiError(
+      400,
+      'INVALID_VEHICLE_ID',
+      'El id del vehículo debe ser un entero mayor a cero.',
+    );
+  }
+
+  return vehicleId;
+}
+
+function parseHistoryLimit(raw: unknown): number {
+  if (raw === undefined) {
+    return DEFAULT_ODOMETER_HISTORY_LIMIT;
+  }
+
+  if (typeof raw !== 'string') {
+    throw new ApiError(
+      400,
+      'INVALID_HISTORY_LIMIT',
+      'El parámetro limit debe ser un número entero.',
+    );
+  }
+
+  const limit = Number(raw);
+
+  if (
+    !Number.isInteger(limit) ||
+    limit <= 0 ||
+    limit > MAX_ODOMETER_HISTORY_LIMIT
+  ) {
+    throw new ApiError(
+      400,
+      'INVALID_HISTORY_LIMIT',
+      `El parámetro limit debe ser un entero entre 1 y ${MAX_ODOMETER_HISTORY_LIMIT}.`,
+    );
+  }
+
+  return limit;
+}
+
+function readNumber(
+  body: Record<string, unknown>,
+  field: string,
+): number {
+  const value = body[field];
+
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new ApiError(
+      400,
+      'INVALID_INPUT',
+      `El campo "${field}" debe ser un número.`,
+    );
+  }
+
+  return value;
+}
+
+function readOptionalNumber(
+  body: Record<string, unknown>,
+  field: string,
+): number | undefined {
+  const value = body[field];
+
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new ApiError(
+      400,
+      'INVALID_INPUT',
+      `El campo "${field}" debe ser un número.`,
+    );
+  }
+
+  return value;
+}
+
+function readOptionalText(
+  body: Record<string, unknown>,
+  field: string,
+): string | null | undefined {
+  const value = body[field];
+
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === null) {
+    return null;
+  }
+
+  if (typeof value !== 'string') {
+    throw new ApiError(
+      400,
+      'INVALID_INPUT',
+      `El campo "${field}" debe ser texto.`,
+    );
+  }
+
+  return value;
+}
+
+function readOptionalDate(
+  body: Record<string, unknown>,
+  field: string,
+): Date | undefined {
+  const value = body[field];
+
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (typeof value !== 'string' && typeof value !== 'number') {
+    throw new ApiError(
+      400,
+      'INVALID_INPUT',
+      `El campo "${field}" debe ser una fecha válida.`,
+    );
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    throw new ApiError(
+      400,
+      'INVALID_INPUT',
+      `El campo "${field}" debe ser una fecha válida.`,
+    );
+  }
+
+  return date;
+}
+
+function readServiceType(
+  body: Record<string, unknown>,
+): MaintenanceServiceType {
+  const value = body['serviceType'];
+
+  if (typeof value !== 'string') {
+    throw new ApiError(
+      400,
+      'INVALID_INPUT',
+      'El campo "serviceType" es obligatorio.',
+    );
+  }
+
+  const normalized = value.trim().toUpperCase();
+  const allowedTypes: readonly string[] = MAINTENANCE_SERVICE_TYPES;
+
+  if (!allowedTypes.includes(normalized)) {
+    throw new ApiError(
+      400,
+      'INVALID_INPUT',
+      `serviceType no es válido. Valores permitidos: ${MAINTENANCE_SERVICE_TYPES.join(', ')}.`,
+    );
+  }
+
+  return normalized as MaintenanceServiceType;
+}
+
+// ============================================================================
+// Construcción de la aplicación
+// ============================================================================
+
+/**
+ * Crea la aplicación Express con los servicios inyectados a partir del pool.
+ * Se exporta para poder probarla sin abrir un puerto.
+ */
+export function createApp(pool: Pool): Express {
+  const app = express();
+
+  // Inyección de dependencias: un único pool compartido por los servicios.
+  const odometerService = new OdometerService(pool);
+  const maintenanceService = new MaintenanceService(pool);
+  const obd2Service = new Obd2Service(pool);
+
+  app.disable('x-powered-by');
+  app.use(cors());
+  app.use(express.json({ limit: JSON_BODY_LIMIT }));
+
+  // --------------------------------------------------------------------------
+  // GET /api/vehicles/:id/odometer
+  // --------------------------------------------------------------------------
+  app.get(
+    '/api/vehicles/:id/odometer',
+    asyncHandler(async (request, response) => {
+      const vehicleId = parseVehicleId(request.params.id);
+      const historyLimit = parseHistoryLimit(request.query.limit);
+
+      const snapshot = await odometerService.getOdometerSnapshot(
+        vehicleId,
+        historyLimit,
+      );
+
+      response.status(200).json(snapshot);
+    }),
+  );
+
+  // --------------------------------------------------------------------------
+  // POST /api/vehicles/:id/odometer  (F03)
+  // --------------------------------------------------------------------------
+  app.post(
+    '/api/vehicles/:id/odometer',
+    asyncHandler(async (request, response) => {
+      const vehicleId = parseVehicleId(request.params.id);
+      const body = asObject(request.body as unknown);
+      const recordedAt = readOptionalDate(body, 'recordedAt');
+
+      const input: RegisterOdometerReadingInput = {
+        vehicleId,
+        kilometers: readNumber(body, 'kilometers'),
+        ...(recordedAt === undefined ? {} : { recordedAt }),
+      };
+
+      const reading = await odometerService.registerReading(input);
+
+      response.status(201).json(reading);
+    }),
+  );
+
+  // --------------------------------------------------------------------------
+  // POST /api/maintenance  (F05)
+  // --------------------------------------------------------------------------
+  app.post(
+    '/api/maintenance',
+    asyncHandler(async (request, response) => {
+      const body = asObject(request.body as unknown);
+
+      const serviceDate = readOptionalDate(body, 'serviceDate');
+      const cost = readOptionalNumber(body, 'cost');
+      const shop = readOptionalText(body, 'shop');
+      const notes = readOptionalText(body, 'notes');
+
+      const input: RegisterMaintenanceInput = {
+        vehicleId: readNumber(body, 'vehicleId'),
+        serviceType: readServiceType(body),
+        serviceKilometers: readNumber(body, 'serviceKilometers'),
+        kilometerInterval: readNumber(body, 'kilometerInterval'),
+        monthInterval: readNumber(body, 'monthInterval'),
+        ...(serviceDate === undefined ? {} : { serviceDate }),
+        ...(cost === undefined ? {} : { cost }),
+        ...(shop === undefined ? {} : { shop }),
+        ...(notes === undefined ? {} : { notes }),
+      };
+
+      const maintenance =
+        await maintenanceService.registerMaintenance(input);
+
+      response.status(201).json(maintenance);
+    }),
+  );
+
+  // --------------------------------------------------------------------------
+  // GET /api/obd2/:code  (F10)
+  // --------------------------------------------------------------------------
+  app.get(
+    '/api/obd2/:code',
+    asyncHandler(async (request, response) => {
+      const code = request.params.code;
+
+      if (code === undefined || Array.isArray(code)) {
+        throw new ApiError(
+          400,
+          'INVALID_CODE',
+          'El código OBD-II es obligatorio.',
+        );
+      }
+
+      const obd2Code = await obd2Service.getByCode(code);
+
+      response.status(200).json(obd2Code);
+    }),
+  );
+
+  // --------------------------------------------------------------------------
+  // Rutas no encontradas
+  // --------------------------------------------------------------------------
+  app.use((request, response) => {
+    response.status(404).json({
+      error: {
+        code: 'ROUTE_NOT_FOUND',
+        message: `No existe la ruta ${request.method} ${request.originalUrl}.`,
+      },
+    });
+  });
+
+  app.use(errorHandler);
+
+  return app;
+}
+
+// ============================================================================
+// Arranque del servidor
+// ============================================================================
+
+function readPort(): number {
+  const rawPort = process.env.PORT?.trim();
+
+  if (!rawPort) {
+    return DEFAULT_PORT;
+  }
+
+  const port = Number(rawPort);
+
+  if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
+    throw new Error(
+      `PORT debe ser un entero entre 1 y 65535; se recibió "${rawPort}".`,
+    );
+  }
+
+  return port;
+}
+
+function readDatabaseUrl(): string {
+  const connectionString = process.env.DATABASE_URL?.trim();
+
+  if (!connectionString) {
+    throw new Error(
+      'DATABASE_URL no está definida. Ejemplo: postgres://usuario:clave@localhost:5432/auto_mantenimiento_pro',
+    );
+  }
+
+  return connectionString;
+}
+
+/** Crea el pool, monta la API y deja el proceso escuchando en el puerto. */
+export async function startServer(): Promise<void> {
+  const pool = new Pool({ connectionString: readDatabaseUrl() });
+
+  // Evita que un error en un cliente inactivo tumbe el proceso sin log.
+  pool.on('error', (error) => {
+    console.error('Error inesperado en un cliente de PostgreSQL:', error);
+  });
+
+  const app = createApp(pool);
+  const port = readPort();
+
+  const server = app.listen(port, () => {
+    console.log(`API REST de AutoMantenimiento Pro en http://localhost:${port}`);
+  });
+
+  server.on('error', (error) => {
+    console.error('No se pudo iniciar el servidor HTTP:', error);
+    void pool.end();
+    process.exitCode = 1;
+  });
+
+  let shuttingDown = false;
+
+  const shutdown = (signal: NodeJS.Signals): void => {
+    if (shuttingDown) {
+      return;
+    }
+
+    shuttingDown = true;
+    console.log(`\nSeñal ${signal} recibida. Cerrando el servidor...`);
+
+    server.close((closeError) => {
+      void pool
+        .end()
+        .catch((poolError: unknown) => {
+          console.error('No se pudo cerrar el pool de PostgreSQL:', poolError);
+          process.exitCode = 1;
+        })
+        .finally(() => {
+          if (closeError) {
+            console.error('No se pudo cerrar el servidor HTTP:', closeError);
+            process.exitCode = 1;
+          }
+        });
+    });
+  };
+
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
+}
+
+// Top-level await: el proceso se mantiene vivo mientras el servidor escucha.
+try {
+  await startServer();
+} catch (error) {
+  console.error('No se pudo arrancar la API REST:', error);
+  process.exitCode = 1;
+}
