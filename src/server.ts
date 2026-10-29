@@ -13,10 +13,19 @@
  *   DATABASE_URL=postgres://usuario:clave@localhost:5432/auto_mantenimiento_pro \
  *     npm run dev:server
  *
- * El puerto se toma de PORT o, si no está definido, se usa 3001.
+ * El puerto se toma de PORT (inyectado por Render en producción) o, si no
+ * está definido, se usa 3001.
+ *
+ * Variables de entorno relevantes para el despliegue:
+ *   PORT         → puerto HTTP escuchado (Render lo inyecta automáticamente).
+ *   DATABASE_URL → cadena de conexión de PostgreSQL.
+ *   FRONTEND_URL → origen del frontend permitido por CORS (admite una lista
+ *                  separada por comas). En producción también se permiten
+ *                  los dominios *.vercel.app (ver isOriginAllowed).
  */
 
 import cors from 'cors';
+import type { CorsOptions } from 'cors';
 import express from 'express';
 import type {
   ErrorRequestHandler,
@@ -50,6 +59,71 @@ const DEFAULT_PORT = 3001;
 
 /** Tamaño máximo aceptado para el cuerpo JSON de una petición. */
 const JSON_BODY_LIMIT = '100kb';
+
+/** Orígenes locales de desarrollo (Vite) siempre permitidos. */
+const LOCAL_DEV_ORIGINS = [
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:4173',
+  'http://127.0.0.1:4173',
+] as const;
+
+/** Patrón de los dominios de despliegue del frontend en Vercel. */
+const VERCEL_ORIGIN_PATTERN = /^https:\/\/[\w-]+(\.[\w-]+)*\.vercel\.app$/i;
+
+/**
+ * Orígenes permitidos por CORS.
+ *
+ * - Orígenes locales de desarrollo (Vite: 5173/4173).
+ * - Los declarados en FRONTEND_URL (separados por coma), p. ej.
+ *   FRONTEND_URL=https://auto-mantenimiento-pro.vercel.app
+ * - En producción se añaden los dominios *.vercel.app del proyecto.
+ */
+export function getAllowedOrigins(): string[] {
+  const fromEnv = (process.env.FRONTEND_URL ?? '')
+    .split(',')
+    .map((origin) => origin.trim().replace(/\/+$/, ''))
+    .filter((origin) => origin.length > 0);
+
+  return [...new Set([...LOCAL_DEV_ORIGINS, ...fromEnv])];
+}
+
+/**
+ * Determina si un origen puede consumir la API.
+ *
+ * Se permite sin lista explícita cualquier subdominio *.vercel.app cuando
+ * NODE_ENV=production (despliegue del frontend en Vercel).
+ */
+export function isOriginAllowed(origin: string | undefined): boolean {
+  // Peticiones sin origen (curl, server-to-server, health checks).
+  if (origin === undefined || origin.trim() === '') {
+    return true;
+  }
+
+  const normalized = origin.trim().replace(/\/+$/, '');
+
+  if (getAllowedOrigins().includes(normalized)) {
+    return true;
+  }
+
+  return (
+    process.env.NODE_ENV === 'production' && VERCEL_ORIGIN_PATTERN.test(normalized)
+  );
+}
+
+/** Opciones de CORS reutilizables por la aplicación. */
+export function buildCorsOptions(): CorsOptions {
+  return {
+    // cors invoca `origin` con la firma asíncrona (origin, callback); devolver
+    // un booleano sincrónico dejaría cada petición colgada sin llamar next().
+    origin: (origin, callback) => {
+      callback(null, isOriginAllowed(origin));
+    },
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    maxAge: 86_400,
+  };
+}
 
 // ============================================================================
 // Errores de la capa HTTP
@@ -416,8 +490,22 @@ export function createApp(pool: Pool): Express {
   const obd2Service = new Obd2Service(pool);
 
   app.disable('x-powered-by');
-  app.use(cors());
+  // Render (y cualquier proxy) termina el TLS: confiar en el primer proxy para
+  // que req.protocol/req.ip reflejen el origen real del cliente.
+  app.set('trust proxy', 1);
+  app.use(cors(buildCorsOptions()));
   app.use(express.json({ limit: JSON_BODY_LIMIT }));
+
+  // --------------------------------------------------------------------------
+  // GET /api/health  → sonda de salud para Render / load balancers
+  // --------------------------------------------------------------------------
+  app.get('/api/health', (_request, response) => {
+    response.status(200).json({
+      status: 'ok',
+      service: 'auto-mantenimiento-pro-api',
+      timestamp: new Date().toISOString(),
+    });
+  });
 
   // --------------------------------------------------------------------------
   // GET /api/vehicles/:id/odometer
@@ -575,9 +663,13 @@ export async function startServer(): Promise<void> {
 
   const app = createApp(pool);
   const port = readPort();
+  // Render exige escuchar en 0.0.0.0 (todas las interfaces).
+  const host = process.env.HOST?.trim() || '0.0.0.0';
 
-  const server = app.listen(port, () => {
-    console.log(`API REST de AutoMantenimiento Pro en http://localhost:${port}`);
+  console.log(`Orígenes CORS permitidos: ${getAllowedOrigins().join(', ')}`);
+
+  const server = app.listen(port, host, () => {
+    console.log(`API REST de AutoMantenimiento Pro escuchando en http://${host}:${port}`);
   });
 
   server.on('error', (error) => {

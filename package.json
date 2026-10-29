@@ -9,8 +9,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "start": "node --enable-source-maps dist/index.js",
-    "start:server": "node --enable-source-maps dist/server.js",
+    "start": "node --enable-source-maps dist/server.js",
+    "start:demo": "node --enable-source-maps dist/index.js",
     "dev": "tsx watch src/index.ts",
     "dev:server": "tsx watch src/server.ts",
     "typecheck": "tsc --noEmit"
