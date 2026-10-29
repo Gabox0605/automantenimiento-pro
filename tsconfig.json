@@ -1,0 +1,39 @@
+{
+  // Configuración de TypeScript para un backend Node.js moderno (ESM).
+  // Compila src/ hacia dist/ y exige tipado estricto en todo el proyecto.
+  "compilerOptions": {
+    // Entorno de ejecución y sintaxis de salida.
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "moduleDetection": "force",
+
+    // Estructura de entrada/salida.
+    "rootDir": "src",
+    "outDir": "dist",
+    "sourceMap": true,
+    "noEmitOnError": true,
+
+    // Tipado estricto.
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "useUnknownInCatchVariables": true,
+
+    // Interoperabilidad y consistencia.
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
