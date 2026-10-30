@@ -8,16 +8,14 @@ import type {
   Obd2Severity,
   OdometerReading,
   OdometerSnapshot,
+  Vehicle,
 } from '../services/api.js';
 import { MaintenanceModal } from './MaintenanceModal.js';
 import { OdometerModal } from './OdometerModal.js';
 import { RtvAlertCard } from './RtvAlertCard.js';
 
-/** Vehículo y código usados para la demostración del panel. */
-const DEMO_VEHICLE_ID = 1;
+/** Código OBD-II de referencia mostrado en el panel (F10). */
 const DEMO_OBD2_CODE = 'P0300';
-/** Placa del vehículo demo (define el mes de RTV por su último dígito: 5 -> mayo). */
-const DEMO_VEHICLE_PLATE = 'B12345';
 
 /** Milisegundos que tiene un día. */
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -157,7 +155,7 @@ function LoadingRows({ label }: { label: string }) {
   );
 }
 
-export function Dashboard() {
+export function Dashboard({ vehicle }: { vehicle: Vehicle }) {
   const [snapshot, setSnapshot] = useState<OdometerSnapshot | null>(null);
   const [obd2, setObd2] = useState<Obd2Code | null>(null);
   const [isLoadingOdometer, setIsLoadingOdometer] = useState(true);
@@ -177,9 +175,11 @@ export function Dashboard() {
       setIsLoadingObd2(true);
       setOdometerError(null);
       setObd2Error(null);
+      // Evita mostrar datos del vehículo anterior al cambiar de vehículo.
+      setSnapshot(null);
 
       const [odometerResult, obd2Result] = await Promise.allSettled([
-        getOdometerSnapshot(DEMO_VEHICLE_ID, 10),
+        getOdometerSnapshot(vehicle.id, 10),
         getObd2Code(DEMO_OBD2_CODE),
       ]);
 
@@ -217,7 +217,7 @@ export function Dashboard() {
     return () => {
       isActive = false;
     };
-  }, [refreshKey]);
+  }, [refreshKey, vehicle.id]);
 
   const latestReading = snapshot?.readings[0] ?? null;
   const recentReadings = snapshot?.readings.slice(0, 6) ?? [];
@@ -293,11 +293,14 @@ export function Dashboard() {
             Panel del vehículo
           </p>
           <h1 className="mt-2 text-2xl font-extrabold tracking-tight text-foreground sm:text-3xl">
-            Toyota Corolla 2018
+            {vehicle.alias || `${vehicle.marca} ${vehicle.modelo} ${vehicle.anio}`}
           </h1>
           <p className="mt-1 text-sm text-muted">
-            Vehículo demo #{DEMO_VEHICLE_ID} · Placa {DEMO_VEHICLE_PLATE} ·
-            Datos obtenidos desde la API.
+            {vehicle.marca} {vehicle.modelo} {vehicle.anio} · {vehicle.tipoMotor}
+            {vehicle.placa ? ` · Placa ${vehicle.placa}` : ''} ·{' '}
+            {vehicle.hasFactorySpecs
+              ? 'Con especificaciones de fábrica'
+              : 'Sin especificaciones de fábrica'}
           </p>
         </div>
 
@@ -328,8 +331,9 @@ export function Dashboard() {
         </div>
       </section>
 
-      {/* Alerta de RTV (Costa Rica) según el último dígito de la placa */}
-      <RtvAlertCard plateNumber={DEMO_VEHICLE_PLATE} />
+      {/* Alerta de RTV (Costa Rica) según el último dígito de la placa.
+          Solo se muestra si el vehículo tiene placa registrada. */}
+      {vehicle.placa ? <RtvAlertCard plateNumber={vehicle.placa} /> : null}
 
       {successMessage ? (
         <div
@@ -663,7 +667,7 @@ export function Dashboard() {
 
       {isOdometerModalOpen ? (
         <OdometerModal
-          vehicleId={DEMO_VEHICLE_ID}
+          vehicleId={vehicle.id}
           currentKilometers={snapshot?.currentKilometers ?? null}
           onClose={() => setIsOdometerModalOpen(false)}
           onSuccess={handleOdometerSuccess}
@@ -672,7 +676,7 @@ export function Dashboard() {
 
       {isMaintenanceModalOpen ? (
         <MaintenanceModal
-          vehicleId={DEMO_VEHICLE_ID}
+          vehicleId={vehicle.id}
           onClose={() => setIsMaintenanceModalOpen(false)}
           onSuccess={handleMaintenanceSuccess}
         />

@@ -133,17 +133,27 @@ COMMENT ON TABLE catalogo_especificaciones IS
 -- ============================================================================
 -- 3. VEHÍCULOS REGISTRADOS (F01, F01.B)
 -- ----------------------------------------------------------------------------
--- usuario_id se mantiene como referencia lógica al módulo de autenticación.
--- Cuando exista la tabla usuarios, se debe agregar:
---   ALTER TABLE vehiculos
---       ADD CONSTRAINT fk_vehiculos_usuario
---       FOREIGN KEY (usuario_id) REFERENCES usuarios(id);
+-- usuario_id es el UUID del usuario autenticado (claim `sub` del JWT de
+-- Supabase Auth) y referencia directamente a auth.users(id) con borrado en
+-- cascada: al eliminar el usuario, desaparecen sus vehículos y su historial.
+-- Migración aplicada: specs/migrations/001_multiusuario_auth.sql
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS vehiculos (
     id                  SERIAL PRIMARY KEY,
-    usuario_id          INTEGER      NOT NULL,
+    usuario_id          UUID         NOT NULL
+                                     REFERENCES auth.users(id)
+                                     ON DELETE CASCADE,
     catalogo_id         INTEGER      REFERENCES catalogo_especificaciones(id)
                                      ON DELETE SET NULL,
+
+    -- Datos de identificación ingresados por el usuario (F01). Se guardan en
+    -- el propio vehículo; catalogo_id es un enlace OPCIONAL a las specs de
+    -- fábrica (F02) que se resuelve al dar de alta si existe coincidencia.
+    marca               VARCHAR(50)  NOT NULL,
+    modelo              VARCHAR(50)  NOT NULL,
+    anio                SMALLINT     NOT NULL,
+    tipo_motor          tipo_motor   NOT NULL,
+
     alias               VARCHAR(50),          -- Nombre amigable, ej. "Mi Corolla".
     placa               VARCHAR(20),
     kilometraje_inicial INTEGER      NOT NULL,
@@ -151,8 +161,9 @@ CREATE TABLE IF NOT EXISTS vehiculos (
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at          TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
-    CONSTRAINT chk_vehiculos_usuario
-        CHECK (usuario_id > 0),
+    -- El año del modelo siempre dentro de un rango razonable.
+    CONSTRAINT chk_vehiculos_anio
+        CHECK (anio BETWEEN 1900 AND 2100),
 
     -- Ningún kilometraje puede ser negativo.
     CONSTRAINT chk_vehiculos_km
@@ -423,10 +434,15 @@ CREATE TRIGGER trg_odometro_actualiza_vehiculo
 
 
 -- ============================================================================
--- 9. DATOS INICIALES DE PRUEBA (SEED)
+-- 9. DATOS INICIALES (SEED)
 -- ----------------------------------------------------------------------------
--- Todos los INSERT son idempotentes y usan usuario_id = 1 como referencia
--- lógica al usuario demo (el módulo de usuarios aún no existe).
+-- Solo catálogos globales: especificaciones de fábrica (F02) y diccionario
+-- OBD-II (F10). Son datos compartidos por todos los usuarios y sus INSERT son
+-- idempotentes.
+--
+-- Los vehículos, las lecturas de odómetro y los mantenimientos NO se siembran
+-- aquí: pertenecen a usuarios reales creados por Supabase Auth (auth.users) y
+-- cada usuario los da de alta desde la aplicación tras iniciar sesión.
 -- ============================================================================
 
 -- 9.1 Catálogo de especificaciones de fábrica.
@@ -448,134 +464,6 @@ VALUES
     ('Nissan',  'Versa',   2015, 2022, 'GASOLINA',  8000, 12, 100000),
     ('Ford',    'Ranger',  2016, 2023, 'DIESEL',   10000, 12, 150000)
 ON CONFLICT DO NOTHING;
-
--- 9.2 Vehículo de prueba: Toyota Corolla 2018 con placa ABC-1234.
-INSERT INTO vehiculos (
-    usuario_id,
-    catalogo_id,
-    alias,
-    placa,
-    kilometraje_inicial,
-    kilometraje_actual
-)
-SELECT
-    1,
-    c.id,
-    'Corolla de casa',
-    'ABC-1234',
-    45000,
-    52300
-FROM catalogo_especificaciones c
-WHERE c.marca = 'Toyota'
-  AND c.modelo = 'Corolla'
-  AND c.anio_inicio = 2014
-  AND c.tipo_motor = 'GASOLINA'
-ON CONFLICT DO NOTHING;
-
--- 9.3 Lecturas de odómetro del vehículo de prueba (aprox. 3 meses de uso).
--- El trigger actualiza vehiculos.kilometraje_actual si alguna lectura es
--- mayor; aquí la última coincide con el kilometraje actual del vehículo.
-INSERT INTO odometro_logs (vehiculo_id, kilometraje, fecha_registro)
-SELECT
-    v.id,
-    d.kilometraje,
-    d.fecha_registro
-FROM vehiculos v
-CROSS JOIN (
-    VALUES
-        (45000, TIMESTAMPTZ '2026-08-01 08:00:00-05'),
-        (46200, TIMESTAMPTZ '2026-08-15 07:30:00-05'),
-        (48900, TIMESTAMPTZ '2026-09-10 18:15:00-05'),
-        (50650, TIMESTAMPTZ '2026-10-05 09:45:00-05'),
-        (52300, TIMESTAMPTZ '2026-10-26 20:10:00-05')
-) AS d (kilometraje, fecha_registro)
-WHERE v.placa = 'ABC-1234'
-  AND NOT EXISTS (
-      SELECT 1
-        FROM odometro_logs o
-       WHERE o.vehiculo_id = v.id
-         AND o.fecha_registro = d.fecha_registro
-  );
-
--- 9.4 Historial de mantenimientos del vehículo de prueba.
-INSERT INTO mantenimientos (
-    vehiculo_id,
-    tipo_servicio,
-    fecha_servicio,
-    kilometraje_servicio,
-    intervalo_km_elegido,
-    intervalo_meses_elegido,
-    costo,
-    taller,
-    excede_specs_fabricante,
-    notas
-)
-SELECT
-    v.id,
-    s.tipo_servicio,
-    s.fecha_servicio,
-    s.kilometraje_servicio,
-    s.intervalo_km_elegido,
-    s.intervalo_meses_elegido,
-    s.costo,
-    s.taller,
-    s.excede_specs_fabricante,
-    s.notas
-FROM vehiculos v
-CROSS JOIN (
-    VALUES
-        (
-            'CAMBIO_ACEITE'::tipo_servicio,
-            TIMESTAMPTZ '2026-08-05 10:30:00-05',
-            45000,
-            10000,
-            12::smallint,
-            185000.00,
-            'Taller Central',
-            FALSE,
-            'Aceite sintético 5W-30 y filtro de aceite.'
-        ),
-        (
-            'FILTRO_AIRE'::tipo_servicio,
-            TIMESTAMPTZ '2026-09-12 11:00:00-05',
-            48900,
-            15000,
-            12::smallint,
-            65000.00,
-            'Taller Central',
-            FALSE,
-            'Filtro de aire de motor reemplazado.'
-        ),
-        (
-            'FRENOS'::tipo_servicio,
-            TIMESTAMPTZ '2026-10-06 15:20:00-05',
-            50650,
-            20000,
-            24::smallint,
-            320000.00,
-            'Frenos del Norte',
-            FALSE,
-            'Pastillas delanteras y revisión de discos.'
-        )
-) AS s (
-    tipo_servicio,
-    fecha_servicio,
-    kilometraje_servicio,
-    intervalo_km_elegido,
-    intervalo_meses_elegido,
-    costo,
-    taller,
-    excede_specs_fabricante,
-    notas
-)
-WHERE v.placa = 'ABC-1234'
-  AND NOT EXISTS (
-      SELECT 1
-        FROM mantenimientos m
-       WHERE m.vehiculo_id = v.id
-         AND m.tipo_servicio = s.tipo_servicio
-         AND m.kilometraje_servicio = s.kilometraje_servicio
-  );
 
 -- 9.5 Diccionario OBD-II: códigos solicitados (P0300, P0420) y casos comunes.
 INSERT INTO codigos_obd2 (
@@ -690,6 +578,25 @@ VALUES
 ON CONFLICT (codigo) DO UPDATE
     SET titulo = EXCLUDED.titulo,
         sintomas = EXCLUDED.sintomas;
+
+
+-- ============================================================================
+-- 10. SEGURIDAD: ROW LEVEL SECURITY (defensa en profundidad)
+-- ----------------------------------------------------------------------------
+-- Se habilita RLS en todas las tablas de la aplicación SIN policies, de modo
+-- que si alguna vez se exponen vía Data API (roles anon/authenticated) el
+-- acceso quede denegado por defecto.
+--
+-- El backend NO se ve afectado: conecta como rol `postgres` (dueño de las
+-- tablas) y RLS no se aplica al dueño salvo FORCE ROW LEVEL SECURITY.
+-- El aislamiento real por usuario lo aplica el backend en cada query
+-- (WHERE usuario_id = $1), lo que cierra BOLA/IDOR.
+-- ============================================================================
+ALTER TABLE vehiculos                 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE odometro_logs             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mantenimientos            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE catalogo_especificaciones ENABLE ROW LEVEL SECURITY;
+ALTER TABLE codigos_obd2              ENABLE ROW LEVEL SECURITY;
 
 
 -- ============================================================================

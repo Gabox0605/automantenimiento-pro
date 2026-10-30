@@ -160,8 +160,7 @@ interface VehicleCatalogRow extends QueryResultRow {
   catalog_id: number | null;
   brand: string | null;
   model: string | null;
-  year_start: number | null;
-  year_end: number | null;
+  year: number | null;
   engine_type: string | null;
   oil_max_km: number | null;
   oil_max_months: number | null;
@@ -192,11 +191,13 @@ const SELECT_VEHICLE_AND_CATALOG = `
   SELECT
       v.id                      AS vehicle_id,
       c.id                      AS catalog_id,
-      c.marca                   AS brand,
-      c.modelo                  AS model,
-      c.anio_inicio             AS year_start,
-      c.anio_fin                AS year_end,
-      c.tipo_motor              AS engine_type,
+      -- Identificación: proviene del propio vehículo (F01), no del catálogo,
+      -- de modo que un vehículo sin specs de fábrica igualmente se describe.
+      v.marca                   AS brand,
+      v.modelo                  AS model,
+      v.anio                    AS year,
+      v.tipo_motor              AS engine_type,
+      -- Límites de fábrica: solo existen si hay catálogo asociado (F02).
       c.aceite_km_maximo        AS oil_max_km,
       c.aceite_meses_maximo     AS oil_max_months,
       c.faja_distribucion_km    AS timing_belt_km
@@ -258,8 +259,8 @@ export class MaintenanceService {
    * PostgreSQL lo almacena mediante la columna generada del esquema; el
    * servicio nunca lo inserta manualmente.
    *
-   * @throws {MaintenanceServiceError} INVALID_INPUT, VEHICLE_NOT_FOUND,
-   *         CATALOG_NOT_FOUND o DATABASE_ERROR.
+   * @throws {MaintenanceServiceError} INVALID_INPUT, VEHICLE_NOT_FOUND o
+   *         DATABASE_ERROR.
    */
   async registerMaintenance(
     input: RegisterMaintenanceInput,
@@ -298,8 +299,13 @@ export class MaintenanceService {
 
   /**
    * Consulta el vehículo y su catálogo. Lanza VEHICLE_NOT_FOUND si el
-   * vehículo no existe y CATALOG_NOT_FOUND si no tiene especificaciones
-   * asociadas (sin catálogo no es posible validar F05).
+   * vehículo no existe.
+   *
+   * Si el vehículo NO tiene especificaciones de fábrica asociadas (catalogo_id
+   * NULL), no es un error: se devuelven límites `null`, de modo que la
+   * validación de F05 queda desactivada para ese servicio y se registra el
+   * mantenimiento igual. Un vehículo arbitrario (F01) puede no estar en el
+   * catálogo (F02).
    */
   private async fetchVehicleAndCatalog(vehicleId: number): Promise<{
     catalog: {
@@ -315,13 +321,6 @@ export class MaintenanceService {
       throw new MaintenanceServiceError(
         'VEHICLE_NOT_FOUND',
         `No existe un vehículo con id ${vehicleId}.`,
-      );
-    }
-
-    if (row.catalog_id === null) {
-      throw new MaintenanceServiceError(
-        'CATALOG_NOT_FOUND',
-        `El vehículo ${vehicleId} no tiene especificaciones de fábrica asociadas; no es posible validar los intervalos.`,
       );
     }
 
@@ -604,13 +603,10 @@ function mapMaintenance(
 function buildVehicleDescription(row: VehicleCatalogRow): string {
   const brand = row.brand ?? 'Vehículo';
   const model = row.model ?? '';
-  const years =
-    row.year_start === null
-      ? ''
-      : ` ${row.year_start}-${row.year_end ?? 'actualidad'}`;
+  const year = row.year === null ? '' : ` ${row.year}`;
   const engine = row.engine_type ? ` ${row.engine_type}` : '';
 
-  return `${brand} ${model}${years}${engine}`.trim().replace(/\s+/g, ' ');
+  return `${brand} ${model}${year}${engine}`.trim().replace(/\s+/g, ' ');
 }
 
 function assertPositiveInteger(value: number, fieldName: string): void {

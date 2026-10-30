@@ -53,6 +53,19 @@ import type {
   RegisterMaintenanceInput,
 } from './services/maintenanceService.js';
 import { Obd2Service, Obd2ServiceError } from './services/obd2Service.js';
+import {
+  VehicleService,
+  VehicleServiceError,
+} from './services/vehicleService.js';
+import type {
+  CreateVehicleInput,
+  UpdateVehicleInput,
+} from './services/vehicleService.js';
+import {
+  assertAuthConfig,
+  requireAuth,
+  requireUser,
+} from './middleware/auth.js';
 
 /** Puerto por defecto cuando la variable de entorno PORT no está definida. */
 const DEFAULT_PORT = 3001;
@@ -146,13 +159,15 @@ class ApiError extends Error {
 type DomainError =
   | OdometerServiceError
   | MaintenanceServiceError
-  | Obd2ServiceError;
+  | Obd2ServiceError
+  | VehicleServiceError;
 
 function isDomainError(error: unknown): error is DomainError {
   return (
     error instanceof OdometerServiceError ||
     error instanceof MaintenanceServiceError ||
-    error instanceof Obd2ServiceError
+    error instanceof Obd2ServiceError ||
+    error instanceof VehicleServiceError
   );
 }
 
@@ -262,6 +277,11 @@ function statusForDomainCode(code: string): number {
     case 'CODE_NOT_FOUND':
     case 'CATALOG_NOT_FOUND':
       return 404;
+
+    // La placa ya registrada por ese mismo usuario: conflicto con un
+    // recurso existente (constraint UNIQUE usuario_id + placa).
+    case 'PLACA_DUPLICADA':
+      return 409;
 
     case 'DATABASE_ERROR':
       return 500;
@@ -639,6 +659,7 @@ export function createApp(pool: Pool): Express {
   const odometerService = new OdometerService(pool);
   const maintenanceService = new MaintenanceService(pool);
   const obd2Service = new Obd2Service(pool);
+  const vehicleService = new VehicleService(pool);
 
   app.disable('x-powered-by');
   // Render (y cualquier proxy) termina el TLS: confiar en el primer proxy para
@@ -673,13 +694,114 @@ export function createApp(pool: Pool): Express {
   );
 
   // --------------------------------------------------------------------------
+  // Autenticación (Supabase Auth)
+  //   A partir de aquí TODA ruta exige un JWT válido en Authorization.
+  //   /api/health (registrada arriba) queda pública para Render y health
+  //   checkers. El middleware inyecta request.user = { sub, email }.
+  // --------------------------------------------------------------------------
+  app.use('/api', requireAuth);
+
+  // --------------------------------------------------------------------------
+  // GET /api/vehicles  (F01: listado de MIS vehículos)
+  // --------------------------------------------------------------------------
+  app.get(
+    '/api/vehicles',
+    asyncHandler(async (request, response) => {
+      const user = requireUser(request);
+      const vehicles = await vehicleService.list(user.sub);
+
+      response.status(200).json(vehicles);
+    }),
+  );
+
+  // --------------------------------------------------------------------------
+  // POST /api/vehicles  (F01: alta de vehículo)
+  // --------------------------------------------------------------------------
+  app.post(
+    '/api/vehicles',
+    asyncHandler(async (request, response) => {
+      const user = requireUser(request);
+      const body = asObject(request.body as unknown);
+
+      const input: CreateVehicleInput = {
+        marca: body.marca as string,
+        modelo: body.modelo as string,
+        anio: body.anio as number,
+        tipoMotor: body.tipoMotor as CreateVehicleInput['tipoMotor'],
+        kilometrajeInicial: body.kilometrajeInicial as number,
+        ...(body.alias === undefined ? {} : { alias: body.alias as string }),
+        ...(body.placa === undefined ? {} : { placa: body.placa as string }),
+      };
+
+      const vehicle = await vehicleService.create(user.sub, input);
+
+      response.status(201).json(vehicle);
+    }),
+  );
+
+  // --------------------------------------------------------------------------
+  // GET /api/vehicles/:id
+  // --------------------------------------------------------------------------
+  app.get(
+    '/api/vehicles/:id',
+    asyncHandler(async (request, response) => {
+      const user = requireUser(request);
+      const vehicleId = parseVehicleId(request.params.id);
+
+      const vehicle = await vehicleService.get(user.sub, vehicleId);
+
+      response.status(200).json(vehicle);
+    }),
+  );
+
+  // --------------------------------------------------------------------------
+  // PATCH /api/vehicles/:id  (alias / placa)
+  // --------------------------------------------------------------------------
+  app.patch(
+    '/api/vehicles/:id',
+    asyncHandler(async (request, response) => {
+      const user = requireUser(request);
+      const vehicleId = parseVehicleId(request.params.id);
+      const body = asObject(request.body as unknown);
+
+      const input: UpdateVehicleInput = {
+        ...(body.alias === undefined ? {} : { alias: body.alias as string }),
+        ...(body.placa === undefined ? {} : { placa: body.placa as string }),
+      };
+
+      const vehicle = await vehicleService.update(user.sub, vehicleId, input);
+
+      response.status(200).json(vehicle);
+    }),
+  );
+
+  // --------------------------------------------------------------------------
+  // DELETE /api/vehicles/:id  (cascada a odómetro y mantenimientos)
+  // --------------------------------------------------------------------------
+  app.delete(
+    '/api/vehicles/:id',
+    asyncHandler(async (request, response) => {
+      const user = requireUser(request);
+      const vehicleId = parseVehicleId(request.params.id);
+
+      await vehicleService.remove(user.sub, vehicleId);
+
+      response.status(204).end();
+    }),
+  );
+
+  // --------------------------------------------------------------------------
   // GET /api/vehicles/:id/odometer
   // --------------------------------------------------------------------------
   app.get(
     '/api/vehicles/:id/odometer',
     asyncHandler(async (request, response) => {
+      const user = requireUser(request);
       const vehicleId = parseVehicleId(request.params.id);
       const historyLimit = parseHistoryLimit(request.query.limit);
+
+      // El vehículo debe pertenecer al usuario autenticado (anti-BOLA).
+      await vehicleService.assertOwnership(user.sub, vehicleId);
 
       const snapshot = await odometerService.getOdometerSnapshot(
         vehicleId,
@@ -696,9 +818,13 @@ export function createApp(pool: Pool): Express {
   app.post(
     '/api/vehicles/:id/odometer',
     asyncHandler(async (request, response) => {
+      const user = requireUser(request);
       const vehicleId = parseVehicleId(request.params.id);
       const body = asObject(request.body as unknown);
       const recordedAt = readOptionalDate(body, 'recordedAt');
+
+      // El vehículo debe pertenecer al usuario autenticado (anti-BOLA).
+      await vehicleService.assertOwnership(user.sub, vehicleId);
 
       const input: RegisterOdometerReadingInput = {
         vehicleId,
@@ -718,15 +844,20 @@ export function createApp(pool: Pool): Express {
   app.post(
     '/api/maintenance',
     asyncHandler(async (request, response) => {
+      const user = requireUser(request);
       const body = asObject(request.body as unknown);
 
       const serviceDate = readOptionalDate(body, 'serviceDate');
       const cost = readOptionalNumber(body, 'cost');
       const shop = readOptionalText(body, 'shop');
       const notes = readOptionalText(body, 'notes');
+      const vehicleId = readNumber(body, 'vehicleId');
+
+      // El vehículo debe pertenecer al usuario autenticado (anti-BOLA).
+      await vehicleService.assertOwnership(user.sub, vehicleId);
 
       const input: RegisterMaintenanceInput = {
-        vehicleId: readNumber(body, 'vehicleId'),
+        vehicleId,
         serviceType: readServiceType(body),
         serviceKilometers: readNumber(body, 'serviceKilometers'),
         kilometerInterval: readNumber(body, 'kilometerInterval'),
@@ -840,6 +971,10 @@ function readDatabaseUrl(): string {
 
 /** Crea el pool, monta la API y deja el proceso escuchando en el puerto. */
 export async function startServer(): Promise<void> {
+  // Fail-fast: si SUPABASE_URL falta o es inválida, el error aparece en los
+  // logs de arranque en vez de como un 401 en cada petición autenticada.
+  const jwksUrl = assertAuthConfig();
+
   const pool = new Pool({ connectionString: readDatabaseUrl() });
 
   // Evita que un error en un cliente inactivo tumbe el proceso sin log.
@@ -853,6 +988,7 @@ export async function startServer(): Promise<void> {
   const host = process.env.HOST?.trim() || '0.0.0.0';
 
   console.log(`Orígenes CORS permitidos: ${getAllowedOrigins().join(', ')}`);
+  console.log(`Auth Supabase (JWKS): ${jwksUrl}`);
 
   const server = app.listen(port, host, () => {
     console.log(`API REST de AutoMantenimiento Pro escuchando en http://${host}:${port}`);

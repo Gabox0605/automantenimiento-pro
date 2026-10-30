@@ -6,7 +6,13 @@
  *
  * La URL base se toma de `VITE_API_URL` o, si no está definida, apunta al
  * backend local en `http://localhost:3001/api`.
+ *
+ * Autenticación: cada petición adjunta el access token de Supabase Auth como
+ * `Authorization: Bearer <jwt>`. El backend lo verifica contra el JWKS del
+ * proyecto y lo usa (claim `sub`) para filtrar los recursos del usuario.
  */
+
+import { supabase } from '../lib/supabase.js';
 
 // ============================================================================
 // Tipos de la API
@@ -164,6 +170,18 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     headers.set('Content-Type', 'application/json');
   }
 
+  // Adjunta el JWT de Supabase Auth si hay sesión activa.
+  // getSession() lee de forma local (localStorage); supabase-js refresca el
+  // token automáticamente si está próximo a expirar.
+  if (!headers.has('Authorization')) {
+    const { data } = await supabase.auth.getSession();
+    const token = data.session?.access_token;
+
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`);
+    }
+  }
+
   let response: Response;
 
   try {
@@ -180,12 +198,28 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
 
   if (!response.ok) {
-    throw await buildApiError(response);
+    const apiError = await buildApiError(response);
+
+    // Sesión inválida o expirada según el backend: cierra la sesión local para
+    // que ProtectedRoute redirija a /login en vez de dejar una UI muerta.
+    if (
+      response.status === 401 &&
+      (apiError.code === 'INVALID_TOKEN' || apiError.code === 'UNAUTHENTICATED')
+    ) {
+      await supabase.auth.signOut().catch(() => undefined);
+    }
+
+    throw apiError;
   }
 
   const text = await response.text();
 
   if (text.trim().length === 0) {
+    // 204 No Content: respuesta vacía esperada (p. ej. DELETE) no es un error.
+    if (response.status === 204) {
+      return undefined as T;
+    }
+
     throw new ApiClientError(
       'La API devolvió una respuesta vacía.',
       response.status,
@@ -314,4 +348,82 @@ export async function registerMaintenance(
 /** Consulta el diccionario OBD-II por código DTC (F10). */
 export async function getObd2Code(code: string): Promise<Obd2Code> {
   return request<Obd2Code>(`/obd2/${encodeURIComponent(code.trim())}`);
+}
+
+// ============================================================================
+// Vehículos (F01)
+// ============================================================================
+
+/** Motorizaciones aceptadas por el backend. */
+export const VEHICLE_ENGINE_TYPES = [
+  'GASOLINA',
+  'DIESEL',
+  'HIBRIDO',
+  'ELECTRICO',
+] as const;
+
+export type VehicleEngineType = (typeof VEHICLE_ENGINE_TYPES)[number];
+
+export interface Vehicle {
+  id: number;
+  marca: string;
+  modelo: string;
+  anio: number;
+  tipoMotor: VehicleEngineType;
+  alias: string | null;
+  placa: string | null;
+  kilometrajeInicial: number;
+  kilometrajeActual: number;
+  /** true si existe especificación de fábrica (F02); si es false, F05 no valida límites. */
+  hasFactorySpecs: boolean;
+  createdAt: string;
+}
+
+export interface CreateVehicleInput {
+  marca: string;
+  modelo: string;
+  anio: number;
+  tipoMotor: VehicleEngineType;
+  kilometrajeInicial: number;
+  alias?: string;
+  placa?: string;
+}
+
+/** Lista los vehículos del usuario autenticado. */
+export async function listVehicles(): Promise<Vehicle[]> {
+  return request<Vehicle[]>('/vehicles');
+}
+
+/** Crea un vehículo para el usuario autenticado (F01). */
+export async function createVehicle(input: CreateVehicleInput): Promise<Vehicle> {
+  return request<Vehicle>('/vehicles', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+/** Obtiene un vehículo propio por id. */
+export async function getVehicle(vehicleId: number): Promise<Vehicle> {
+  return request<Vehicle>(
+    `/vehicles/${encodeURIComponent(String(vehicleId))}`,
+  );
+}
+
+/** Actualiza alias y/o placa de un vehículo propio. */
+export async function updateVehicle(
+  vehicleId: number,
+  input: { alias?: string; placa?: string },
+): Promise<Vehicle> {
+  return request<Vehicle>(
+    `/vehicles/${encodeURIComponent(String(vehicleId))}`,
+    { method: 'PATCH', body: JSON.stringify(input) },
+  );
+}
+
+/** Elimina un vehículo propio (y su historial, por cascada). */
+export async function deleteVehicle(vehicleId: number): Promise<void> {
+  await request<void>(
+    `/vehicles/${encodeURIComponent(String(vehicleId))}`,
+    { method: 'DELETE' },
+  );
 }
