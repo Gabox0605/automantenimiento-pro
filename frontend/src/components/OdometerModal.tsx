@@ -2,12 +2,19 @@ import { useState } from 'react';
 import type { FormEvent } from 'react';
 
 import { ApiClientError, registerOdometerReading } from '../services/api.js';
-import type { OdometerReading } from '../services/api.js';
+import type { DistanceUnit, OdometerReading } from '../services/api.js';
+import { toKilometers, UNIT_LABELS } from '../utils/units.js';
 import { Modal } from './Modal.js';
 
 interface OdometerModalProps {
   vehicleId: number;
   currentKilometers: number | null;
+  /**
+   * Unidad en la que escribe el usuario. La lectura se convierte a km antes
+   * de compararla con `currentKilometers` (almacenado en km) y antes de
+   * enviarse, de modo que la validación y la API siempre trabajan en km.
+   */
+  unit: DistanceUnit;
   onClose: () => void;
   onSuccess: (reading: OdometerReading) => void;
 }
@@ -29,6 +36,7 @@ const numberFormatter = new Intl.NumberFormat('es-CO');
 export function OdometerModal({
   vehicleId,
   currentKilometers,
+  unit,
   onClose,
   onSuccess,
 }: OdometerModalProps) {
@@ -38,25 +46,40 @@ export function OdometerModal({
   const [apiError, setApiError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Equivalente en km de lo que el usuario está escribiendo (solo informativo,
+  // para que no tenga que convertir mentalmente). La BD guarda km.
+  const lecturaEscrita = Number(kilometers);
+  const equivalenteKm =
+    unit === 'MI' &&
+    kilometers.trim().length > 0 &&
+    Number.isInteger(lecturaEscrita) &&
+    lecturaEscrita >= 0
+      ? toKilometers(lecturaEscrita, 'MI')
+      : null;
+
   const handleSubmit = async (
     event: FormEvent<HTMLFormElement>,
   ): Promise<void> => {
     event.preventDefault();
 
-    const parsedKilometers = Number(kilometers);
+    const parsedReading = Number(kilometers);
+    // Conversión a km ANTES de validar: `currentKilometers` está almacenado
+    // en km y la API también recibe km. Así la comparación es km vs km y no
+    // se rechazan lecturas válidas de vehículos en millas.
+    const readingInKilometers = toKilometers(parsedReading, unit);
     const nextErrors: OdometerFieldErrors = {};
 
     if (kilometers.trim().length === 0) {
-      nextErrors.kilometers = 'Ingresa el kilometraje actual.';
+      nextErrors.kilometers = 'Ingresa la lectura del odómetro.';
     } else if (
-      !Number.isInteger(parsedKilometers) ||
-      parsedKilometers < 0
+      !Number.isInteger(parsedReading) ||
+      parsedReading < 0
     ) {
       nextErrors.kilometers =
-        'El kilometraje debe ser un número entero mayor o igual a cero.';
+        'La lectura debe ser un número entero mayor o igual a cero.';
     } else if (
       currentKilometers !== null &&
-      parsedKilometers < currentKilometers
+      readingInKilometers < currentKilometers
     ) {
       nextErrors.kilometers = `La lectura no puede ser menor al odómetro actual (${numberFormatter.format(currentKilometers)} km).`;
     }
@@ -84,9 +107,10 @@ export function OdometerModal({
     setIsSubmitting(true);
 
     try {
+      // Siempre se envía en kilómetros (unidad de almacenamiento y de API).
       const reading = await registerOdometerReading(
         vehicleId,
-        parsedKilometers,
+        readingInKilometers,
         recordedAtIso,
       );
 
@@ -116,7 +140,8 @@ export function OdometerModal({
 
         <div>
           <label htmlFor="odometer-kilometers" className={labelClass}>
-            Kilometraje actual <span className="text-danger">*</span>
+            Lectura actual ({UNIT_LABELS[unit]}){' '}
+            <span className="text-danger">*</span>
           </label>
           <input
             id="odometer-kilometers"
@@ -147,11 +172,19 @@ export function OdometerModal({
               {fieldErrors.kilometers}
             </p>
           ) : (
-            <p id="odometer-kilometers-hint" className={hintClass}>
-              {currentKilometers !== null
-                ? `Odómetro actual: ${numberFormatter.format(currentKilometers)} km. La lectura debe ser igual o mayor.`
-                : 'Ingresa el valor que marca el tablero del vehículo.'}
-            </p>
+            <>
+              <p id="odometer-kilometers-hint" className={hintClass}>
+                {currentKilometers !== null
+                  ? `Odómetro actual: ${numberFormatter.format(currentKilometers)} km. La lectura debe ser igual o mayor.`
+                  : 'Ingresa el valor que marca el tablero del vehículo.'}
+              </p>
+              {/* Vehículo en millas: muestra el equivalente que se guardará. */}
+              {equivalenteKm !== null ? (
+                <p className="mt-1 text-xs font-medium text-secondary">
+                  Se guardará como {numberFormatter.format(equivalenteKm)} km.
+                </p>
+              ) : null}
+            </>
           )}
         </div>
 

@@ -364,6 +364,16 @@ export const VEHICLE_ENGINE_TYPES = [
 
 export type VehicleEngineType = (typeof VEHICLE_ENGINE_TYPES)[number];
 
+/**
+ * Unidad en la que el tablero del vehículo registra distancia.
+ *
+ * Solo gobierna la entrada del usuario: la API y la BD trabajan SIEMPRE en
+ * kilómetros (el cliente convierte antes de enviar).
+ */
+export const DISTANCE_UNITS = ['KM', 'MI'] as const;
+
+export type DistanceUnit = (typeof DISTANCE_UNITS)[number];
+
 export interface Vehicle {
   id: number;
   marca: string;
@@ -376,6 +386,8 @@ export interface Vehicle {
   kilometrajeActual: number;
   /** true si existe especificación de fábrica (F02); si es false, F05 no valida límites. */
   hasFactorySpecs: boolean;
+  /** Unidad en la que el tablero del vehículo registra (KM o MI). */
+  unidadDistancia: DistanceUnit;
   /** Declaración al alta: al día con la RTV (si es true nunca se alerta como vencido). */
   rtvAlDia: boolean;
   createdAt: string;
@@ -386,7 +398,10 @@ export interface CreateVehicleInput {
   modelo: string;
   anio: number;
   tipoMotor: VehicleEngineType;
+  /** En la unidad del vehículo; el cliente convierte a km si es MI. */
   kilometrajeInicial: number;
+  /** Unidad en la que escribe el usuario (por defecto KM). */
+  unidadDistancia?: DistanceUnit;
   alias?: string;
   placa?: string;
   /** true = el usuario declara el vehículo al día con la RTV al registrarlo. */

@@ -210,6 +210,14 @@ export function VehiclesPage() {
                     {vehicle.kilometrajeActual.toLocaleString('es')} km
                   </dd>
                 </div>
+                {vehicle.unidadDistancia === 'MI' ? (
+                  <div className="flex items-center justify-between">
+                    <dt className="text-muted">Registra en</dt>
+                    <dd className="font-medium text-foreground">
+                      Millas (aquí se muestra km)
+                    </dd>
+                  </div>
+                ) : null}
               </dl>
 
               <div className="mt-5 flex flex-col gap-2">

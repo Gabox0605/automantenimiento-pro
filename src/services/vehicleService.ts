@@ -28,6 +28,18 @@ export const VEHICLE_ENGINE_TYPES = [
 
 export type VehicleEngineType = (typeof VEHICLE_ENGINE_TYPES)[number];
 
+/**
+ * Unidades en las que el tablero del vehículo registra distancia
+ * (esquema ENUM `unidad_distancia`).
+ *
+ * Solo gobierna la interpretación de la ENTRADA del usuario: en la base de
+ * datos se almacena SIEMPRE kilómetros, de modo que la validación de límites
+ * de fábrica (F05) y los mensajes del backend nunca requieren conversiones.
+ */
+export const DISTANCE_UNITS = ['KM', 'MI'] as const;
+
+export type DistanceUnit = (typeof DISTANCE_UNITS)[number];
+
 export type VehicleServiceErrorCode =
   | 'INVALID_INPUT'
   | 'VEHICLE_NOT_FOUND'
@@ -58,6 +70,12 @@ export interface CreateVehicleInput {
   anio: number;
   tipoMotor: VehicleEngineType;
   kilometrajeInicial: number;
+  /**
+   * Unidad en la que el usuario ESCRIBE las distancias de este vehículo.
+   * `MI` implica que el cliente convierte a kilómetros antes de enviar; este
+   * servicio siempre recibe y guarda kilómetros. Por defecto `KM`.
+   */
+  unidadDistancia?: DistanceUnit;
   /** Nombre amigable, opcional (ej. "Mi Corolla"). */
   alias?: string | null;
   /** Patente, opcional. Debe ser única por usuario. */
@@ -87,6 +105,8 @@ export interface Vehicle {
   kilometrajeActual: number;
   /** true si el vehículo tiene especificaciones de fábrica (F02) asociadas. */
   hasFactorySpecs: boolean;
+  /** Unidad en la que el tablero del vehículo registra (KM o MI). */
+  unidadDistancia: DistanceUnit;
   /** Declaración del usuario: al día con la RTV al dar de alta. */
   rtvAlDia: boolean;
   createdAt: Date;
@@ -107,6 +127,7 @@ interface VehicleRow extends QueryResultRow {
   kilometraje_inicial: number;
   kilometraje_actual: number;
   catalogo_id: number | null;
+  unidad_distancia: string;
   rtv_al_dia: boolean;
   created_at: Date;
 }
@@ -123,6 +144,7 @@ function mapVehicle(row: VehicleRow): Vehicle {
     kilometrajeInicial: row.kilometraje_inicial,
     kilometrajeActual: row.kilometraje_actual,
     hasFactorySpecs: row.catalogo_id !== null,
+    unidadDistancia: row.unidad_distancia as DistanceUnit,
     rtvAlDia: row.rtv_al_dia,
     createdAt: row.created_at,
   };
@@ -143,6 +165,7 @@ const VEHICLE_COLUMNS = `
       kilometraje_inicial,
       kilometraje_actual,
       catalogo_id,
+      unidad_distancia,
       rtv_al_dia,
       created_at`;
 
@@ -159,7 +182,8 @@ const INSERT_VEHICLE = `
       placa,
       kilometraje_inicial,
       kilometraje_actual,
-      rtv_al_dia
+      rtv_al_dia,
+      unidad_distancia
   )
   VALUES (
       $1,
@@ -172,7 +196,7 @@ const INSERT_VEHICLE = `
              AND $5::integer BETWEEN anio_inicio AND COALESCE(anio_fin, 2100)
            LIMIT 1
       ),
-      $2, $3, $5, $4, $6, $7, $8, $8, $9
+      $2, $3, $5, $4, $6, $7, $8, $8, $9, $10::unidad_distancia
   )
   RETURNING${VEHICLE_COLUMNS}
 `;
@@ -303,6 +327,22 @@ function assertOptionalBoolean(value: unknown, field: string): boolean {
   return value;
 }
 
+/** Unidad de distancia opcional con valor por defecto `KM`. */
+function assertDistanceUnit(value: unknown): DistanceUnit {
+  if (value === undefined || value === null) {
+    return 'KM';
+  }
+  if (
+    typeof value !== 'string' ||
+    !(DISTANCE_UNITS as readonly string[]).includes(value)
+  ) {
+    invalid(
+      `El campo "unidadDistancia" debe ser uno de: ${DISTANCE_UNITS.join(', ')}.`,
+    );
+  }
+  return value as DistanceUnit;
+}
+
 /** Traduce la violación de UNIQUE de placa a un error de dominio amigable. */
 function translateDatabaseError(error: unknown, context: string): never {
   const code =
@@ -360,8 +400,11 @@ export class VehicleService {
     const alias = optionalText(input.alias, 'alias', 50);
     const placa = optionalText(input.placa, 'placa', 20);
     const rtvAlDia = assertOptionalBoolean(input.rtvAlDia, 'rtvAlDia');
+    const unidadDistancia = assertDistanceUnit(input.unidadDistancia);
 
     try {
+      // kilometrajeInicial llega SIEMPRE en kilómetros: si el vehículo
+      // registra en millas, el cliente convierte antes de enviar.
       const result = await this.pool.query<VehicleRow>(INSERT_VEHICLE, [
         userId,
         marca,
@@ -372,6 +415,7 @@ export class VehicleService {
         placa,
         kilometrajeInicial,
         rtvAlDia,
+        unidadDistancia,
       ]);
 
       const row = result.rows[0];

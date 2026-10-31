@@ -301,6 +301,9 @@ export function Dashboard({ vehicle }: { vehicle: Vehicle }) {
             {vehicle.hasFactorySpecs
               ? 'Con especificaciones de fábrica'
               : 'Sin especificaciones de fábrica'}
+            {vehicle.unidadDistancia === 'MI'
+              ? ' · Registra en millas (este panel muestra kilómetros)'
+              : ''}
           </p>
         </div>
 
@@ -671,6 +674,7 @@ export function Dashboard({ vehicle }: { vehicle: Vehicle }) {
         <OdometerModal
           vehicleId={vehicle.id}
           currentKilometers={snapshot?.currentKilometers ?? null}
+          unit={vehicle.unidadDistancia}
           onClose={() => setIsOdometerModalOpen(false)}
           onSuccess={handleOdometerSuccess}
         />
@@ -679,6 +683,7 @@ export function Dashboard({ vehicle }: { vehicle: Vehicle }) {
       {isMaintenanceModalOpen ? (
         <MaintenanceModal
           vehicleId={vehicle.id}
+          unit={vehicle.unidadDistancia}
           onClose={() => setIsMaintenanceModalOpen(false)}
           onSuccess={handleMaintenanceSuccess}
         />

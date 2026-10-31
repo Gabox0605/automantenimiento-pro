@@ -59,6 +59,7 @@ import {
 } from './services/vehicleService.js';
 import type {
   CreateVehicleInput,
+  DistanceUnit,
   UpdateVehicleInput,
 } from './services/vehicleService.js';
 import {
@@ -735,6 +736,10 @@ export function createApp(pool: Pool): Express {
         ...(body.rtvAlDia === undefined
           ? {}
           : { rtvAlDia: body.rtvAlDia as boolean }),
+        // Unidad en la que el cliente escribe las distancias (KM por defecto).
+        ...(body.unidadDistancia === undefined
+          ? {}
+          : { unidadDistancia: body.unidadDistancia as DistanceUnit }),
       };
 
       const vehicle = await vehicleService.create(user.sub, input);

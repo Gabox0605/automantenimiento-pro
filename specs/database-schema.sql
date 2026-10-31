@@ -69,6 +69,19 @@ BEGIN
 END
 $$;
 
+-- Unidad en la que el tablero del vehículo registra distancia. Solo afecta a
+-- la interpretación de la entrada del usuario: en BD todo se guarda en km.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'unidad_distancia') THEN
+        CREATE TYPE unidad_distancia AS ENUM (
+            'KM',
+            'MI'
+        );
+    END IF;
+END
+$$;
+
 
 -- ============================================================================
 -- 2. CATÁLOGO DE ESPECIFICACIONES DE FÁBRICA (F02)
@@ -152,7 +165,14 @@ CREATE TABLE IF NOT EXISTS vehiculos (
     marca               VARCHAR(50)  NOT NULL,
     modelo              VARCHAR(50)  NOT NULL,
     anio                SMALLINT     NOT NULL,
+    -- Motorización del vehículo (F01).
     tipo_motor          tipo_motor   NOT NULL,
+
+    -- Unidad en la que el tablero del vehículo registra distancia (vehículos
+    -- importados pueden venir en millas). La BD guarda SIEMPRE kilómetros:
+    -- esta columna solo indica al frontend en qué unidad interpretar lo que
+    -- escribe el usuario (la conversión ocurre en el cliente).
+    unidad_distancia    unidad_distancia NOT NULL DEFAULT 'KM',
 
     alias               VARCHAR(50),          -- Nombre amigable, ej. "Mi Corolla".
     placa               VARCHAR(20),

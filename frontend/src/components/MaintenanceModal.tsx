@@ -7,14 +7,21 @@ import {
   registerMaintenance,
 } from '../services/api.js';
 import type {
+  DistanceUnit,
   MaintenanceInput,
   MaintenanceResponse,
   MaintenanceServiceType,
 } from '../services/api.js';
+import { fromKilometers, toKilometers, UNIT_LABELS } from '../utils/units.js';
 import { Modal } from './Modal.js';
+
+/** Intervalo por defecto expresado en kilómetros (catálogo típico de aceite). */
+const DEFAULT_INTERVAL_KM = 10_000;
 
 interface MaintenanceModalProps {
   vehicleId: number;
+  /** Unidad en la que escribe el usuario (la API siempre recibe km). */
+  unit: DistanceUnit;
   onClose: () => void;
   onSuccess: (record: MaintenanceResponse) => void;
 }
@@ -37,13 +44,21 @@ const numberFormatter = new Intl.NumberFormat('es-CO');
 /** Formulario para registrar un mantenimiento y validar sus intervalos (F05). */
 export function MaintenanceModal({
   vehicleId,
+  unit,
   onClose,
   onSuccess,
 }: MaintenanceModalProps) {
   const [serviceType, setServiceType] =
     useState<MaintenanceServiceType>('CAMBIO_ACEITE');
   const [serviceKilometers, setServiceKilometers] = useState('');
-  const [kilometerInterval, setKilometerInterval] = useState('10000');
+  // El intervalo por defecto se expresa en la unidad del vehículo. Para
+  // vehículos en millas, 10 000 km equivalen a 6 214 mi (vuelven a 10 000 km
+  // al convertir), por lo que no se marca un exceso de fábrica espurio.
+  const [kilometerInterval, setKilometerInterval] = useState(
+    String(
+      unit === 'MI' ? fromKilometers(DEFAULT_INTERVAL_KM) : DEFAULT_INTERVAL_KM,
+    ),
+  );
   const [monthInterval, setMonthInterval] = useState('12');
   const [notes, setNotes] = useState('');
   const [fieldErrors, setFieldErrors] = useState<MaintenanceFieldErrors>({});
@@ -66,17 +81,17 @@ export function MaintenanceModal({
     }
 
     if (serviceKilometers.trim().length === 0) {
-      nextErrors.serviceKilometers = 'Ingresa el kilometraje del servicio.';
+      nextErrors.serviceKilometers = `Ingresa la lectura del servicio en ${UNIT_LABELS[unit]}.`;
     } else if (
       !Number.isInteger(parsedServiceKilometers) ||
       parsedServiceKilometers < 0
     ) {
       nextErrors.serviceKilometers =
-        'El kilometraje debe ser un entero mayor o igual a cero.';
+        'La lectura debe ser un entero mayor o igual a cero.';
     }
 
     if (kilometerInterval.trim().length === 0) {
-      nextErrors.kilometerInterval = 'Ingresa el intervalo en kilómetros.';
+      nextErrors.kilometerInterval = `Ingresa el intervalo en ${UNIT_LABELS[unit]}.`;
     } else if (
       !Number.isInteger(parsedKilometerInterval) ||
       parsedKilometerInterval <= 0
@@ -106,8 +121,11 @@ export function MaintenanceModal({
     const input: MaintenanceInput = {
       vehicleId,
       serviceType,
-      serviceKilometers: parsedServiceKilometers,
-      kilometerInterval: parsedKilometerInterval,
+      // La BD, la API y la validación de límites de fábrica (F05) trabajan
+      // siempre en kilómetros: la conversión desde la unidad del vehículo
+      // ocurre aquí, antes de salir del navegador.
+      serviceKilometers: toKilometers(parsedServiceKilometers, unit),
+      kilometerInterval: toKilometers(parsedKilometerInterval, unit),
       monthInterval: parsedMonthInterval,
       ...(trimmedNotes.length > 0 ? { notes: trimmedNotes } : {}),
     };
@@ -202,7 +220,8 @@ export function MaintenanceModal({
               htmlFor="maintenance-service-kilometers"
               className={labelClass}
             >
-              Kilometraje del servicio <span className="text-danger">*</span>
+              Lectura del servicio ({UNIT_LABELS[unit]}){' '}
+              <span className="text-danger">*</span>
             </label>
             <input
               id="maintenance-service-kilometers"
@@ -247,7 +266,8 @@ export function MaintenanceModal({
                 htmlFor="maintenance-kilometer-interval"
                 className={labelClass}
               >
-                Intervalo en km <span className="text-danger">*</span>
+                Intervalo en {UNIT_LABELS[unit]}{' '}
+                <span className="text-danger">*</span>
               </label>
               <input
                 id="maintenance-kilometer-interval"

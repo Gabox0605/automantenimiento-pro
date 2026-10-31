@@ -12,11 +12,14 @@ import { useState, type FormEvent } from 'react';
 import { Modal } from './Modal.js';
 import {
   createVehicle,
+  DISTANCE_UNITS,
   VEHICLE_ENGINE_TYPES,
   type CreateVehicleInput,
+  type DistanceUnit,
   type Vehicle,
   type VehicleEngineType,
 } from '../services/api.js';
+import { UNIT_LABELS, UNIT_NAMES, toKilometers } from '../utils/units.js';
 
 const MIN_YEAR = 1900;
 const MAX_YEAR = 2100;
@@ -42,7 +45,10 @@ interface FormState {
   modelo: string;
   anio: string;
   tipoMotor: VehicleEngineType;
+  /** Lectura inicial en la unidad del vehículo (se convierte a km al enviar). */
   kilometrajeInicial: string;
+  /** Unidad en la que escribe el usuario. */
+  unidadDistancia: DistanceUnit;
   alias: string;
   placa: string;
   /** Declaración: el vehículo está al día con la RTV (revisión técnica). */
@@ -55,6 +61,7 @@ const INITIAL_FORM: FormState = {
   anio: '',
   tipoMotor: 'GASOLINA',
   kilometrajeInicial: '',
+  unidadDistancia: 'KM',
   alias: '',
   placa: '',
   rtvAlDia: false,
@@ -99,9 +106,10 @@ export function VehicleFormModal({ onClose, onCreated }: VehicleFormModalProps) 
       errors.tipoMotor = 'Selecciona una motorización válida.';
     }
 
-    const km = Number(form.kilometrajeInicial);
-    if (!Number.isInteger(km) || km < 0) {
-      errors.kilometrajeInicial = 'Introduce un kilometraje entero mayor o igual a 0.';
+    // Lectura inicial expresada en la unidad del vehículo (puede ser millas).
+    const lecturaInicial = Number(form.kilometrajeInicial);
+    if (!Number.isInteger(lecturaInicial) || lecturaInicial < 0) {
+      errors.kilometrajeInicial = `Introduce una lectura entera mayor o igual a 0, en ${UNIT_NAMES[form.unidadDistancia].toLowerCase()}.`;
     }
 
     const alias = form.alias.trim();
@@ -123,7 +131,10 @@ export function VehicleFormModal({ onClose, onCreated }: VehicleFormModalProps) 
         modelo,
         anio,
         tipoMotor: form.tipoMotor,
-        kilometrajeInicial: km,
+        unidadDistancia: form.unidadDistancia,
+        // La BD guarda kilómetros: si el vehículo registra en millas, la
+        // conversión ocurre aquí, antes de salir del navegador.
+        kilometrajeInicial: toKilometers(lecturaInicial, form.unidadDistancia),
         rtvAlDia: form.rtvAlDia,
         ...(alias.length > 0 ? { alias } : {}),
         ...(placa.length > 0 ? { placa } : {}),
@@ -151,6 +162,17 @@ export function VehicleFormModal({ onClose, onCreated }: VehicleFormModalProps) 
       setSubmitting(false);
     }
   }
+
+  // Equivalente en km que se va a guardar (solo cuando el vehículo registra
+  // en millas y el valor escrito ya es válido) — evita que el usuario tenga
+  // que convertir mentalmente y mantenerse coherente con el resto de la UI,
+  // que trabaja en kilómetros.
+  const lecturaNumero = Number(form.kilometrajeInicial);
+  const mostrarEquivalente =
+    form.unidadDistancia === 'MI' &&
+    form.kilometrajeInicial.trim().length > 0 &&
+    Number.isInteger(lecturaNumero) &&
+    lecturaNumero >= 0;
 
   const inputClass = (hasError: boolean): string =>
     `w-full rounded-xl border bg-background px-3.5 py-2.5 text-sm text-foreground outline-none transition placeholder:text-muted focus:ring-2 focus:ring-secondary/40 ${
@@ -256,9 +278,35 @@ export function VehicleFormModal({ onClose, onCreated }: VehicleFormModalProps) 
           </div>
         </div>
 
+        {/* Unidad en la que el tablero del vehículo registra distancia. */}
+        <div>
+          <label htmlFor="v-unidad" className="mb-1.5 block text-sm font-medium text-foreground">
+            Unidad del odómetro <span className="text-danger">*</span>
+          </label>
+          <select
+            id="v-unidad"
+            value={form.unidadDistancia}
+            onChange={(event) =>
+              update('unidadDistancia', event.target.value as DistanceUnit)
+            }
+            className={inputClass(false)}
+          >
+            {DISTANCE_UNITS.map((unit) => (
+              <option key={unit} value={unit}>
+                {UNIT_NAMES[unit]} ({UNIT_LABELS[unit]})
+              </option>
+            ))}
+          </select>
+          <p className="mt-1.5 text-xs text-muted">
+            Los vehículos importados suelen registrar en millas. Escribe en la
+            unidad de tu tablero: el sistema guarda y compara en kilómetros.
+          </p>
+        </div>
+
         <div>
           <label htmlFor="v-km" className="mb-1.5 block text-sm font-medium text-foreground">
-            Kilometraje inicial <span className="text-danger">*</span>
+            Lectura inicial ({UNIT_LABELS[form.unidadDistancia]}){' '}
+            <span className="text-danger">*</span>
           </label>
           <input
             id="v-km"
@@ -266,7 +314,7 @@ export function VehicleFormModal({ onClose, onCreated }: VehicleFormModalProps) 
             inputMode="numeric"
             value={form.kilometrajeInicial}
             onChange={(event) => update('kilometrajeInicial', event.target.value)}
-            placeholder="45000"
+            placeholder={form.unidadDistancia === 'MI' ? '50000' : '45000'}
             min={0}
             aria-invalid={Boolean(fieldErrors.kilometrajeInicial)}
             className={inputClass(Boolean(fieldErrors.kilometrajeInicial))}
@@ -276,8 +324,15 @@ export function VehicleFormModal({ onClose, onCreated }: VehicleFormModalProps) 
               {fieldErrors.kilometrajeInicial}
             </p>
           ) : null}
+          {mostrarEquivalente ? (
+            <p className="mt-1.5 text-xs font-medium text-secondary">
+              Se guardará como{' '}
+              {toKilometers(lecturaNumero, 'MI').toLocaleString('es')} km.
+            </p>
+          ) : null}
           <p className="mt-1.5 text-xs text-muted">
-            Lectura actual del odómetro al registrar el vehículo.
+            Lectura del odómetro al registrar el vehículo
+            {form.unidadDistancia === 'MI' ? ' (la verás convertida a km en el panel)' : ''}.
           </p>
         </div>
 
