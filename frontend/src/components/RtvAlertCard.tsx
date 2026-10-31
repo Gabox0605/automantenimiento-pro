@@ -124,6 +124,12 @@ function RtvCalendarStrip({ activeMonthIndex }: { activeMonthIndex: number }) {
 export interface RtvAlertCardProps {
   /** Número de placa del vehículo (ej. "B123456"). */
   plateNumber: string;
+  /**
+   * Declaración capturada en el alta: el vehículo está al día con la RTV.
+   * Si es true, jamás se muestra como vencido y el próximo ciclo salta al
+   * año siguiente.
+   */
+  rtvAlDia?: boolean;
   /** Fecha de referencia opcional (principalmente para pruebas). */
   referenceDate?: Date;
   /** Clases adicionales para ajustar el layout en el Dashboard. */
@@ -139,12 +145,14 @@ export interface RtvAlertCardProps {
  */
 export function RtvAlertCard({
   plateNumber,
+  rtvAlDia = false,
   referenceDate,
   className = '',
 }: RtvAlertCardProps) {
   const status = getRtvStatus(
     plateNumber,
     referenceDate ?? new Date(),
+    { rtvAlDia },
   );
 
   // Sin placa utilizable (sin dígitos): no hay nada que alertar.
@@ -153,14 +161,18 @@ export function RtvAlertCard({
   }
 
   const styles = levelStyles[status.level];
-  const levelBadgeLabel =
-    status.level === 'danger'
+  // Con la declaración "al día", el nivel siempre es 'info' pero el rótulo y
+  // el título reflejan que el usuario ya aprobó la revisión.
+  const levelBadgeLabel = status.isAlDia
+    ? 'Al día'
+    : status.level === 'danger'
       ? 'RTV vencido'
       : status.level === 'warning'
         ? status.inAdvanceWindow
           ? 'Mes de adelanto'
           : 'Mes de RTV'
         : 'RTV programado';
+  const cardTitle = status.isAlDia ? 'RTV al día' : styles.title;
 
   return (
     <section
@@ -189,7 +201,7 @@ export function RtvAlertCard({
             </div>
 
             <h2 className="mt-1.5 font-secondary text-xl font-extrabold tracking-tight text-foreground">
-              {styles.title}
+              {cardTitle}
             </h2>
 
             <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted">

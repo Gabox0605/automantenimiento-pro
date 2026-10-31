@@ -731,6 +731,10 @@ export function createApp(pool: Pool): Express {
         kilometrajeInicial: body.kilometrajeInicial as number,
         ...(body.alias === undefined ? {} : { alias: body.alias as string }),
         ...(body.placa === undefined ? {} : { placa: body.placa as string }),
+        // Estado de RTV al alta (se valida como booleano en el servicio).
+        ...(body.rtvAlDia === undefined
+          ? {}
+          : { rtvAlDia: body.rtvAlDia as boolean }),
       };
 
       const vehicle = await vehicleService.create(user.sub, input);

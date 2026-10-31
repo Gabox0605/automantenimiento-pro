@@ -45,6 +45,8 @@ interface FormState {
   kilometrajeInicial: string;
   alias: string;
   placa: string;
+  /** Declaración: el vehículo está al día con la RTV (revisión técnica). */
+  rtvAlDia: boolean;
 }
 
 const INITIAL_FORM: FormState = {
@@ -55,6 +57,7 @@ const INITIAL_FORM: FormState = {
   kilometrajeInicial: '',
   alias: '',
   placa: '',
+  rtvAlDia: false,
 };
 
 const ENGINE_LABELS: Record<VehicleEngineType, string> = {
@@ -121,6 +124,7 @@ export function VehicleFormModal({ onClose, onCreated }: VehicleFormModalProps) 
         anio,
         tipoMotor: form.tipoMotor,
         kilometrajeInicial: km,
+        rtvAlDia: form.rtvAlDia,
         ...(alias.length > 0 ? { alias } : {}),
         ...(placa.length > 0 ? { placa } : {}),
       },
@@ -316,6 +320,30 @@ export function VehicleFormModal({ onClose, onCreated }: VehicleFormModalProps) 
             ) : null}
           </div>
         </div>
+
+        {/* RTV (revisión técnica): declaración capturada en el alta. */}
+        <label
+          htmlFor="v-rtv"
+          className="flex cursor-pointer items-start gap-3 rounded-xl border border-line bg-background p-3.5 transition hover:border-secondary/60"
+        >
+          <input
+            id="v-rtv"
+            type="checkbox"
+            checked={form.rtvAlDia}
+            onChange={(event) => update('rtvAlDia', event.target.checked)}
+            className="mt-0.5 h-4 w-4 shrink-0 accent-secondary"
+          />
+          <span>
+            <span className="block text-sm font-medium text-foreground">
+              Está al día con la RTV (revisión técnica)
+            </span>
+            <span className="mt-0.5 block text-xs text-muted">
+              Si el mes de RTV de su placa ya pasó, se asume la revisión
+              aprobada y la próxima alerta será el año siguiente en lugar de
+              "vencido".
+            </span>
+          </span>
+        </label>
 
         <div className="flex flex-col-reverse gap-3 pt-1 sm:flex-row sm:justify-end">
           <button

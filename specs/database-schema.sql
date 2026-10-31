@@ -158,6 +158,12 @@ CREATE TABLE IF NOT EXISTS vehiculos (
     placa               VARCHAR(20),
     kilometraje_inicial INTEGER      NOT NULL,
     kilometraje_actual  INTEGER      NOT NULL,
+
+    -- Declaración del usuario al dar de alta: si se encuentra al día con la
+    -- Revisión Técnica Vehicular (RTV). Cuando es true, la UI no alerta como
+    -- "vencido" aunque el mes asignado por placa ya haya pasado, y el próximo
+    -- ciclo salta al año siguiente.
+    rtv_al_dia          BOOLEAN      NOT NULL DEFAULT false,
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at          TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
 

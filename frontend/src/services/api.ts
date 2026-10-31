@@ -376,6 +376,8 @@ export interface Vehicle {
   kilometrajeActual: number;
   /** true si existe especificación de fábrica (F02); si es false, F05 no valida límites. */
   hasFactorySpecs: boolean;
+  /** Declaración al alta: al día con la RTV (si es true nunca se alerta como vencido). */
+  rtvAlDia: boolean;
   createdAt: string;
 }
 
@@ -387,6 +389,8 @@ export interface CreateVehicleInput {
   kilometrajeInicial: number;
   alias?: string;
   placa?: string;
+  /** true = el usuario declara el vehículo al día con la RTV al registrarlo. */
+  rtvAlDia?: boolean;
 }
 
 /** Lista los vehículos del usuario autenticado. */

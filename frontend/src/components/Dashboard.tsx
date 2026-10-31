@@ -333,7 +333,9 @@ export function Dashboard({ vehicle }: { vehicle: Vehicle }) {
 
       {/* Alerta de RTV (Costa Rica) según el último dígito de la placa.
           Solo se muestra si el vehículo tiene placa registrada. */}
-      {vehicle.placa ? <RtvAlertCard plateNumber={vehicle.placa} /> : null}
+      {vehicle.placa ? (
+        <RtvAlertCard plateNumber={vehicle.placa} rtvAlDia={vehicle.rtvAlDia} />
+      ) : null}
 
       {successMessage ? (
         <div

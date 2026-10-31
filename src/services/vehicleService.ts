@@ -62,6 +62,12 @@ export interface CreateVehicleInput {
   alias?: string | null;
   /** Patente, opcional. Debe ser única por usuario. */
   placa?: string | null;
+  /**
+   * Declaración de que el vehículo está al día con la RTV (Revisión Técnica
+   * Vehicular). Por defecto false: sin declararlo, un mes de RTV ya pasado se
+   * alerta como vencido (comportamiento histórico).
+   */
+  rtvAlDia?: boolean;
 }
 
 export interface UpdateVehicleInput {
@@ -81,6 +87,8 @@ export interface Vehicle {
   kilometrajeActual: number;
   /** true si el vehículo tiene especificaciones de fábrica (F02) asociadas. */
   hasFactorySpecs: boolean;
+  /** Declaración del usuario: al día con la RTV al dar de alta. */
+  rtvAlDia: boolean;
   createdAt: Date;
 }
 
@@ -99,6 +107,7 @@ interface VehicleRow extends QueryResultRow {
   kilometraje_inicial: number;
   kilometraje_actual: number;
   catalogo_id: number | null;
+  rtv_al_dia: boolean;
   created_at: Date;
 }
 
@@ -114,6 +123,7 @@ function mapVehicle(row: VehicleRow): Vehicle {
     kilometrajeInicial: row.kilometraje_inicial,
     kilometrajeActual: row.kilometraje_actual,
     hasFactorySpecs: row.catalogo_id !== null,
+    rtvAlDia: row.rtv_al_dia,
     createdAt: row.created_at,
   };
 }
@@ -133,6 +143,7 @@ const VEHICLE_COLUMNS = `
       kilometraje_inicial,
       kilometraje_actual,
       catalogo_id,
+      rtv_al_dia,
       created_at`;
 
 /** Alta: resuelve el catálogo de fábrica (F02) en la misma sentencia. */
@@ -147,7 +158,8 @@ const INSERT_VEHICLE = `
       alias,
       placa,
       kilometraje_inicial,
-      kilometraje_actual
+      kilometraje_actual,
+      rtv_al_dia
   )
   VALUES (
       $1,
@@ -160,7 +172,7 @@ const INSERT_VEHICLE = `
              AND $5::integer BETWEEN anio_inicio AND COALESCE(anio_fin, 2100)
            LIMIT 1
       ),
-      $2, $3, $5, $4, $6, $7, $8, $8
+      $2, $3, $5, $4, $6, $7, $8, $8, $9
   )
   RETURNING${VEHICLE_COLUMNS}
 `;
@@ -275,6 +287,22 @@ function assertEngineType(value: unknown): VehicleEngineType {
   return value as VehicleEngineType;
 }
 
+/**
+ * Booleano opcional con valor por defecto `false`.
+ *
+ * `false` conserva el comportamiento histórico de la RTV: un mes de RTV ya
+ * pasado se alerta como vencido.
+ */
+function assertOptionalBoolean(value: unknown, field: string): boolean {
+  if (value === undefined || value === null) {
+    return false;
+  }
+  if (typeof value !== 'boolean') {
+    invalid(`El campo "${field}" debe ser verdadero o falso.`);
+  }
+  return value;
+}
+
 /** Traduce la violación de UNIQUE de placa a un error de dominio amigable. */
 function translateDatabaseError(error: unknown, context: string): never {
   const code =
@@ -331,6 +359,7 @@ export class VehicleService {
     );
     const alias = optionalText(input.alias, 'alias', 50);
     const placa = optionalText(input.placa, 'placa', 20);
+    const rtvAlDia = assertOptionalBoolean(input.rtvAlDia, 'rtvAlDia');
 
     try {
       const result = await this.pool.query<VehicleRow>(INSERT_VEHICLE, [
@@ -342,6 +371,7 @@ export class VehicleService {
         alias,
         placa,
         kilometrajeInicial,
+        rtvAlDia,
       ]);
 
       const row = result.rows[0];

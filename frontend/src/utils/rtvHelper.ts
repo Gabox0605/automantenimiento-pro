@@ -95,6 +95,12 @@ export interface RtvStatus {
   inAdvanceWindow: boolean;
   /** true si el RTV del año en curso ya venció. */
   isExpired: boolean;
+  /**
+   * true si el usuario declaró el vehículo AL DÍA con la RTV al registrarlo.
+   * Cuando es true, el estado nunca es `danger`/`warning`: el próximo ciclo
+   * salta al año siguiente.
+   */
+  isAlDia: boolean;
   /** Año calendario evaluado. */
   evaluatedYear: number;
   /** Mensaje recordatorio listo para mostrar al usuario. */
@@ -113,16 +119,17 @@ export function getLastNumericDigit(plateNumber: string): number | null {
 }
 
 /**
- * Calcula el estado RTV de un vehículo a partir de su placa.
+ * Cálculo base del estado RTV a partir de la placa (sin contemplar la
+ * declaración "al día"; eso lo aplica `getRtvStatus`).
  *
  * @param plateNumber Placa del vehículo (ej. "B123456").
  * @param reference Fecha de referencia (por defecto: hoy). Permite pruebas.
  * @returns El estado RTV o `null` si la placa no contiene dígitos.
  */
-export function getRtvStatus(
+function computeRtvStatus(
   plateNumber: string,
-  reference: Date = new Date(),
-): RtvStatus | null {
+  reference: Date,
+): Omit<RtvStatus, 'isAlDia'> | null {
   const normalizedPlate = plateNumber.trim().toUpperCase();
   const lastDigit = getLastNumericDigit(normalizedPlate);
 
@@ -226,4 +233,79 @@ export function formatMonthsRemaining(monthsRemaining: number): string {
   }
 
   return `${monthsRemaining} meses`;
+}
+
+// ============================================================================
+// Declaración "al día con la RTV" (capturada en el alta del vehículo)
+// ============================================================================
+
+export interface RtvStatusOptions {
+  /**
+   * Declaración del usuario al registrar el vehículo: se encuentra al día con
+   * la RTV. Si es true, el estado jamás resulta `danger`/`warning` y el
+   * próximo ciclo salta al año siguiente.
+   */
+  rtvAlDia?: boolean;
+}
+
+/**
+ * Calcula el estado RTV de un vehículo aplicando la declaración "al día".
+ *
+ * Regla (requerimiento de negocio): si `rtvAlDia` es true y el cálculo base
+ * resulta "vencido" (danger) o "en mes de RTV / adelanto" (warning), se
+ * asume el ciclo aprobado y la próxima alerta apunta al mismo mes del año
+ * siguiente. Si el mes asignado aún está por venir (info), se conserva el
+ * recordatorio normal.
+ *
+ * Ejemplo: placa terminada en 1 (RTV en Enero) registrada en Octubre =>
+ *   - sin declaración: "RTV vencido" (danger)
+ *   - con rtvAlDia: "al día, próximo ciclo en Enero del año siguiente" (info)
+ *
+ * @param plateNumber Placa del vehículo (ej. "B123456").
+ * @param reference Fecha de referencia (por defecto: hoy).
+ * @param options Declaraciones capturadas en el alta.
+ * @returns El estado RTV o `null` si la placa no contiene dígitos.
+ */
+export function getRtvStatus(
+  plateNumber: string,
+  reference: Date = new Date(),
+  options: RtvStatusOptions = {},
+): RtvStatus | null {
+  const status = computeRtvStatus(plateNumber, reference);
+
+  if (!status) {
+    return null;
+  }
+
+  // Sin declaración, o el mes asignado aún no llegó: estado base intacto.
+  if (options.rtvAlDia !== true || status.level === 'info') {
+    return { ...status, isAlDia: false };
+  }
+
+  return { ...applyAlDia(status, reference), isAlDia: true };
+}
+
+/**
+ * Convierte un estado "vencido" o "mes de RTV" en el próximo ciclo anual.
+ *
+ * La fórmula `12 - mesActual + mesAsignado` da los meses naturales hasta la
+ * siguiente ocurrencia y es válida para los tres casos (mes ya pasado, mes
+ * actual y mes de adelanto).
+ */
+function applyAlDia(
+  status: Omit<RtvStatus, 'isAlDia'>,
+  reference: Date,
+): Omit<RtvStatus, 'isAlDia'> {
+  const currentMonthIndex = reference.getMonth();
+  const nextYear = reference.getFullYear() + 1;
+  const monthsRemaining = 12 - currentMonthIndex + status.assignedMonthIndex;
+
+  return {
+    ...status,
+    level: 'info',
+    monthsRemaining,
+    inAdvanceWindow: false,
+    isExpired: false,
+    message: `El vehículo fue registrado como al día con la RTV. El próximo ciclo de ${status.assignedMonthName} vence en ${nextYear}.`,
+  };
 }
