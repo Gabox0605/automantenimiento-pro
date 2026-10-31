@@ -20,7 +20,7 @@ const DEMO_OBD2_CODE = 'P0300';
 /** Milisegundos que tiene un día. */
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
-type StatusTone = 'success' | 'warning' | 'danger' | 'neutral';
+export type StatusTone = 'success' | 'warning' | 'danger' | 'neutral';
 
 interface UsageSummary {
   kilometersDriven: number;
@@ -68,9 +68,9 @@ const metricToneClasses = {
   tertiary: 'bg-tertiary text-white',
 } as const;
 
-type MetricTone = keyof typeof metricToneClasses;
+export type MetricTone = keyof typeof metricToneClasses;
 
-interface MetricCardProps {
+export interface MetricCardProps {
   label: string;
   value: string;
   hint: string;
@@ -78,7 +78,8 @@ interface MetricCardProps {
   tone: MetricTone;
 }
 
-function MetricCard({ label, value, hint, icon, tone }: MetricCardProps) {
+/** Tarjeta de métrica compartida entre el Dashboard y la vista previa. */
+export function MetricCard({ label, value, hint, icon, tone }: MetricCardProps) {
   return (
     <article className="rounded-2xl border border-line bg-surface p-5 shadow-card">
       <div className="flex items-start justify-between gap-4">
@@ -98,7 +99,8 @@ function MetricCard({ label, value, hint, icon, tone }: MetricCardProps) {
   );
 }
 
-function StatusPill({
+/** Píldora de estado compartida entre el Dashboard y la vista previa. */
+export function StatusPill({
   tone,
   children,
 }: {
@@ -809,7 +811,7 @@ function getApiOrigin(): string {
   }
 }
 
-function GaugeIcon() {
+export function GaugeIcon() {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -829,7 +831,7 @@ function GaugeIcon() {
   );
 }
 
-function TrendIcon() {
+export function TrendIcon() {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -853,7 +855,7 @@ function TrendIcon() {
   );
 }
 
-function CalendarIcon() {
+export function CalendarIcon() {
   return (
     <svg
       viewBox="0 0 24 24"
