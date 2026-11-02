@@ -19,8 +19,7 @@ import { AppShell } from './components/AppShell.js';
 import { ProtectedRoute } from './components/ProtectedRoute.js';
 import { AuthProvider, useAuth } from './context/AuthContext.js';
 import { LandingPage } from './pages/LandingPage.js';
-import { LoginPage } from './pages/LoginPage.js';
-import { RegisterPage } from './pages/RegisterPage.js';
+import { AuthPage } from './pages/AuthPage.js';
 import { VehicleDashboardPage } from './pages/VehicleDashboardPage.js';
 import { VehiclesPage } from './pages/VehiclesPage.js';
 
@@ -65,8 +64,8 @@ export default function App() {
         <Routes>
           {/* Públicas */}
           <Route path="/" element={<HomeRoute />} />
-          <Route path="/login" element={<LoginPage />} />
-          <Route path="/registro" element={<RegisterPage />} />
+          <Route path="/login" element={<AuthPage initialMode="login" />} />
+          <Route path="/registro" element={<AuthPage initialMode="register" />} />
 
           {/* Protegidas */}
           <Route
